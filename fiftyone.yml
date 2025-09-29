@@ -1,0 +1,31 @@
+name: "@voxel51/vlmrun"
+label: VLM Run
+description: 🎯 Extract structured data from visual and audio sources including documents, images, and videos
+version: 1.0.0
+author: VLM Run Team
+license: MIT
+url: https://github.com/vlm-run/vlmrun-voxel51-plugin
+repository: https://github.com/vlm-run/vlmrun-voxel51-plugin
+documentation: https://docs.vlm.run
+
+tags:
+  - computer-vision
+  - document-analysis
+  - object-detection
+  - video-analysis
+  - ai
+  - machine-learning
+  - vision-language-model
+  - vlm
+  - multimodal
+
+operators:
+  - object_detection
+  - person_detection
+  - document_analysis
+  - invoice_parsing
+  - layout_detection
+  - video_transcription
+
+fiftyone:
+  version: ">=0.20.0"
