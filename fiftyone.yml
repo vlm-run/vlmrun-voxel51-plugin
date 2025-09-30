@@ -20,12 +20,12 @@ tags:
   - multimodal
 
 operators:
-  - object_detection
-  - person_detection
-  - document_analysis
-  - invoice_parsing
-  - layout_detection
-  - video_transcription
+  - vlmrun_object_detection
+  - vlmrun_person_detection
+  - vlmrun_parse_invoices
+  - vlmrun_layout_detection
+  - vlmrun_transcribe_video
+  - vlmrun_caption_images
 
 fiftyone:
   version: ">=0.20.0"
