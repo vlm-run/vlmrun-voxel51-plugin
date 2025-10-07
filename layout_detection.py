@@ -106,7 +106,7 @@ class VLMRunLayoutDetection(foo.Operator):
             from vlmrun.client.types import GenerationConfig
         except ImportError:
             return {
-                "error": "VLMRun package not installed. Run: fiftyone plugins requirements @voxel51/vlmrun --install"
+                "error": "VLMRun package not installed. Run: fiftyone plugins requirements @vlm-run/vlmrun-voxel51-plugin --install"
             }
 
         # Get configuration

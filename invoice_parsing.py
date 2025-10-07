@@ -139,7 +139,7 @@ class VLMRunParseInvoices(foo.Operator):
             from vlmrun.client import VLMRun
         except ImportError:
             return {
-                "error": "VLMRun package not installed. Run: fiftyone plugins requirements @voxel51/vlmrun --install"
+                "error": "VLMRun package not installed. Run: fiftyone plugins requirements @vlm-run/vlmrun-voxel51-plugin --install"
             }
 
         # Get configuration from environment or use defaults

@@ -15,7 +15,7 @@ fiftyone plugins download \
 Install the required dependencies:
 
 ```shell
-fiftyone plugins requirements @voxel51/vlmrun --install
+fiftyone plugins requirements @vlm-run/vlmrun-voxel51-plugin --install
 ```
 
 Refer to the [FiftyOne Plugins documentation](https://docs.voxel51.com/plugins/index.html) for
