@@ -43,7 +43,7 @@ the FiftyOne App.
 import fiftyone as fo
 import fiftyone.zoo as foz
 
-dataset = foz.load_zoo_dataset("quickstart")
+dataset = foz.load_zoo_dataset("quickstart", max_samples=10)
 session = fo.launch_app(dataset)
 ```
 
