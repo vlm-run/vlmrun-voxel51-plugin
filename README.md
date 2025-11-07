@@ -30,7 +30,7 @@ Set your VLM Run API key as an environment variable:
 export VLM_API_KEY="your-api-key-here"
 ```
 
-You can obtain an API key from [vlm.run]([https://vlm.run](https://app.vlm.run/dashboard/settings/api-keys)).
+You can obtain an API key from [vlm.run](https://app.vlm.run/dashboard/settings/api-keys).
 
 Alternatively, you can provide the API key directly when running operators in
 the FiftyOne App.
