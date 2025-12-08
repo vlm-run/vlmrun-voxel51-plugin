@@ -90,6 +90,42 @@ class TestDocumentOperators:
         assert operator is not None
 
 
+class TestChatCompletionsOperator:
+    """Test chat completions operator."""
+
+    def test_chat_completions_init(self):
+        """Test VLMRunChatCompletions operator initialization."""
+        from __init__ import VLMRunChatCompletions
+
+        operator = VLMRunChatCompletions()
+        config = operator.config
+
+        assert config.name == "vlmrun_chat_completions"
+        assert config.label == "VLM Run: Chat Completions (Orion)"
+        assert config.dynamic is True
+        assert operator is not None
+
+    def test_chat_completions_has_required_methods(self):
+        """Test VLMRunChatCompletions has all required operator methods."""
+        from __init__ import VLMRunChatCompletions
+
+        operator = VLMRunChatCompletions()
+
+        assert hasattr(operator, 'config')
+        assert hasattr(operator, 'resolve_input')
+        assert hasattr(operator, 'execute')
+        assert hasattr(operator, 'resolve_output')
+
+    def test_chat_completions_media_content_helper(self):
+        """Test the media content helper method exists."""
+        from __init__ import VLMRunChatCompletions
+
+        operator = VLMRunChatCompletions()
+
+        assert hasattr(operator, '_get_media_content')
+        assert hasattr(operator, '_process_chat_result')
+
+
 class TestOperatorRegistry:
     """Test that all operators are properly registered."""
 
@@ -101,20 +137,22 @@ class TestOperatorRegistry:
             VLMRunObjectDetection,
             VLMRunPersonDetection,
             VLMRunParseInvoices,
-            VLMRunLayoutDetection
+            VLMRunLayoutDetection,
+            VLMRunChatCompletions
         )
 
-        # Verify all 6 operators are importable
+        # Verify all 7 operators are importable
         operators = [
             VLMRunTranscribeVideo,
             VLMRunCaptionImages,
             VLMRunObjectDetection,
             VLMRunPersonDetection,
             VLMRunParseInvoices,
-            VLMRunLayoutDetection
+            VLMRunLayoutDetection,
+            VLMRunChatCompletions
         ]
 
-        assert len(operators) == 6
+        assert len(operators) == 7
 
         for op_class in operators:
             operator = op_class()

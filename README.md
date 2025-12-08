@@ -194,6 +194,47 @@ Supported modes:
 Each mode provides temporal information and can be combined for comprehensive
 video understanding.
 
+### chat_completions
+
+Flexible image analysis using VLM Run's Orion chat completions API with natural
+language prompts.
+
+This operator provides an OpenAI-compatible chat interface for analyzing images
+with custom prompts and multiple response formats:
+
+```py
+# Analyze images with natural language prompts
+from vlmrun import VLMRun
+
+client = VLMRun(api_key="your-api-key", base_url="https://agent.vlm.run/v1")
+response = client.agent.completions.create(
+    model="vlmrun-orion-1:auto",
+    messages=[
+        {"role": "user", "content": [
+            {"type": "text", "text": "Describe this image in detail."},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+        ]}
+    ]
+)
+```
+
+**Available Models:**
+- `vlmrun-orion-1:fast` - Optimized for simple tasks with speed
+- `vlmrun-orion-1:auto` - Automatically selects best model for task (default)
+- `vlmrun-orion-1:pro` - Most capable for complex multi-step workflows
+
+**Response Formats:**
+- **Text** - Free-form text responses for general descriptions
+- **JSON Object** - Flexible JSON output for structured data
+- **JSON Schema** - Strict schema enforcement for validated outputs
+
+Features:
+- Custom natural language prompts for any analysis task
+- Optional system prompts for context setting
+- Temperature control for response creativity
+- Schema validation for structured outputs
+- Token usage tracking
+
 ## Visual Grounding
 
 When enabled, visual grounding provides bounding box coordinates in normalized
