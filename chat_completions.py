@@ -132,9 +132,18 @@ class VLMRunChatCompletions(foo.Operator):
 
         mode = ctx.params.get("mode", "analyze")
 
-        # Target selection (only for analyze mode)
+        # Show notice if samples are selected (analyze mode only)
+        if mode == "analyze" and ctx.selected:
+            inputs.str(
+                "selected_notice",
+                view=types.Notice(
+                    label=f"{len(ctx.selected)} sample(s) selected - only these will be processed"
+                ),
+            )
+
+        # Target selection (only for analyze mode when no samples selected)
         has_view = ctx.dataset is not None and ctx.view != ctx.dataset.view()
-        if mode == "analyze" and has_view:
+        if mode == "analyze" and has_view and not ctx.selected:
             target_choices = types.RadioGroup()
             target_choices.add_choice("DATASET", label="Entire dataset")
             target_choices.add_choice("VIEW", label="Current view")
@@ -479,20 +488,25 @@ class VLMRunChatCompletions(foo.Operator):
 
             output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Get samples
-        sample_collection = ctx.view if target == "VIEW" else ctx.dataset
-
-        # Apply max_samples limit if specified
-        if max_samples and max_samples > 0:
-            samples = sample_collection.take(max_samples)
+        # Get samples - prioritize selected samples if any
+        if ctx.selected:
+            # Process only selected samples
+            samples = ctx.dataset.select(ctx.selected)
         else:
-            samples = sample_collection
+            # Fall back to view or dataset
+            sample_collection = ctx.view if target == "VIEW" else ctx.dataset
+
+            # Apply max_samples limit if specified
+            if max_samples and max_samples > 0:
+                samples = sample_collection.take(max_samples)
+            else:
+                samples = sample_collection
 
         total_samples = len(samples)
 
         if total_samples == 0:
             return {
-                "error": "No supported samples found in the selected collection (images, videos, or PDFs)"
+                "error": "No supported samples found. Select samples or ensure the collection has images, videos, or PDFs."
             }
 
         # Initialize VLM Run client with Orion API endpoint
