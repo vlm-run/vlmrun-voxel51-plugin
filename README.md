@@ -25,7 +25,7 @@ locally.
 Set your VLM Run API key as an environment variable:
 
 ```shell
-export VLM_API_KEY="your-api-key-here"
+export VLMRUN_API_KEY="your-api-key-here"
 ```
 
 You can obtain an API key from [vlm.run](https://app.vlm.run/dashboard/settings/api-keys).
@@ -52,12 +52,10 @@ session = fo.launch_app(dataset)
 
 ## Operators
 
-### chat_completions
+### vlmrun_chat_completions
 
 Flexible media analysis and content generation using VLM Run's Orion chat
 completions API with natural language prompts.
-
-![Chat Completions Demo](gifs/vlmrun_fiftyone_chat_2.gif)
 
 **How to use:**
 
@@ -77,7 +75,7 @@ options.
 
 - **Annotate** — Produce spatial annotations: bounding boxes (Detections),
   keypoints, or segmentation masks. Results are stored as native FiftyOne label
-  types. Available for image datasets only.
+  types. Available for image and document datasets (not video).
 
 - **Edit** — Modify existing media with natural language instructions (e.g.,
   "Blur all faces", "Trim to the first 5 seconds"). Edited files are saved and
@@ -111,10 +109,8 @@ options.
 
 **Additional features:**
 - Select specific samples before opening the operator to process only those
-- Artifacts (images, videos, audio, documents, 3D Gaussian Splats) are
-  automatically downloaded and added as new dataset samples
-- SPZ files from 3D reconstruction are converted to PLY format for FiftyOne's
-  3D visualization (requires `spz` library)
+- Artifacts (images, videos, audio, documents) are automatically downloaded
+  and added as new dataset samples
 
 ---
 
@@ -171,27 +167,6 @@ Features:
 - Precise bounding boxes with confidence scores
 
 **Document Operators**
-
-#### document_analysis
-
-Extract text and analyze document structure from PDFs and images.
-
-This operator leverages VLM Run's document analysis capabilities:
-
-```py
-# Analyze document structure and extract text
-client.run(
-    "document.analysis",
-    document_path,
-    grounding=True
-)
-```
-
-The operator extracts:
-- Text content with spatial coordinates
-- Document structure (headers, paragraphs, sections)
-- Tables and figures with bounding boxes
-- Reading order information
 
 #### invoice_parsing
 
@@ -286,15 +261,11 @@ document elements directly on your images.
 - **Images**: JPEG, PNG, BMP, TIFF, and other common formats
 - **Documents**: PDF files and document images
 - **Videos**: MP4, AVI, MOV, MKV, WEBM, FLV, WMV, M4V
-- **3D**: PLY (Gaussian Splats converted from SPZ)
 
 ## Execution Modes
 
-All operators support two execution modes:
-
-- **Immediate**: Process immediately in the FiftyOne App (default)
-- **Delegated**: Queue for background processing (requires
-  [orchestrator setup](https://docs.voxel51.com/plugins/using_plugins.html#delegating-plugin-operations))
+All operators run in immediate execution mode, processing directly in the
+FiftyOne App.
 
 ## Learn More
 
