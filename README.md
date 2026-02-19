@@ -72,8 +72,8 @@ options.
 **Modes:**
 
 - **Analyze** — Describe, caption, or extract information from your media using
-  natural language prompts. Results are stored as text in a sample field.
-  Works with images, videos, and PDFs.
+  natural language prompts. Results are stored as text in a sample field, along
+  with model and usage metadata fields. Works with images, videos, and PDFs.
 
 - **Annotate** — Produce spatial annotations: bounding boxes (Detections),
   keypoints, or segmentation masks. Results are stored as native FiftyOne label
@@ -93,12 +93,13 @@ options.
 |--------|-------------|
 | Model | `fast` (speed), `auto` (default), or `pro` (complex tasks) |
 | Prompt | Natural language instruction for the task |
+| Output Type | Type of spatial annotation to produce: Detections, Keypoints, or Segmentation masks (Annotate mode only) |
+| Result Field | Field name to store the output (default varies by mode) |
 | Temperature | Controls randomness (0 = deterministic, 1 = creative) |
 | System Prompt | Optional context-setting prompt |
-| Toolsets | Comma-separated tool categories (e.g., `core`, `viz`, `image`, `video`, `document`, `web`) |
+| Toolsets | Select which tool categories to enable (filtered by media type) |
 | Number of Generations | How many items to generate (Generate mode only) |
 | Max Samples | Limit number of samples to process |
-| Save Generated Artifacts | Save any artifacts the model generates as new samples |
 
 **Media type filtering:**
 
