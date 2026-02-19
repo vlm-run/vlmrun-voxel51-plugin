@@ -30,6 +30,20 @@ DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_RETRIES = 5
 MAX_ERROR_DETAILS = 5
 
+# All available toolsets (used by checkbox UI and parser)
+ALL_TOOLSETS = ["core", "viz", "image", "video", "document", "web", "image-gen"]
+
+# Short descriptions for each toolset (shown next to checkboxes)
+TOOLSET_DESCRIPTIONS = {
+    "core": "Analyze images, extract content, process video",
+    "image": "Object detection, text recognition, segmentation, quality assessment",
+    "image-gen": "Create, transform, or apply effects to images",
+    "viz": "Bounding boxes, keypoints, and segmentation masks",
+    "document": "Layout detection, text extraction, structured data",
+    "video": "Frame sampling, trimming, segmentation, video generation",
+    "web": "Search the web to augment responses with real-time data",
+}
+
 # Default model
 DEFAULT_MODEL = "vlmrun-orion-1:auto"
 
@@ -242,12 +256,15 @@ class VLMRunChatCompletions(foo.Operator):
             )
 
         # Mode selection — filter by media type compatibility
+        # For unknown/None media types, show all options
+        show_all = media_type in (None, "unknown")
         mode_choices = types.RadioGroup()
         mode_choices.add_choice("analyze", label="Analyze existing media")
-        if media_type != "video":
+        if show_all or media_type != "video":
             mode_choices.add_choice("annotate", label="Annotate media (detections, keypoints, segmentation)")
         mode_choices.add_choice("edit", label="Edit existing media")
-        mode_choices.add_choice("generate", label="Generate new content (no input media)")
+        if show_all or media_type in ("image", "video"):
+            mode_choices.add_choice("generate", label="Generate new content (no input media)")
         inputs.enum(
             "mode",
             mode_choices.values(),
@@ -311,26 +328,10 @@ class VLMRunChatCompletions(foo.Operator):
 
         # Prompt input - different defaults based on mode
         if mode == "generate":
-            # Toolset selection for generate mode — filtered by media type
-            toolset_choices = types.Dropdown()
             if media_type == "video":
-                toolset_choices.add_choice("video", label="Video")
-                gen_default_toolset = "video"
                 gen_default_prompt = "Create a short video clip of a sunset over the ocean"
             else:
-                # Image datasets (or unknown) — only image-gen is compatible
-                toolset_choices.add_choice("image-gen", label="Image Generation")
-                gen_default_toolset = "image-gen"
                 gen_default_prompt = "A photorealistic image of a sunset over the ocean"
-
-            inputs.enum(
-                "toolset",
-                toolset_choices.values(),
-                default=gen_default_toolset,
-                label="Toolset",
-                description="Choose the type of content to generate",
-                view=toolset_choices,
-            )
 
             inputs.str(
                 "prompt",
@@ -386,8 +387,8 @@ class VLMRunChatCompletions(foo.Operator):
             inputs.str(
                 "prompt",
                 label="Prompt",
-                description="Describe the edit to apply (e.g., 'Blur all faces', 'Increase brightness', 'Remove the background')",
-                default="Blur all faces in the image",
+                description="Describe the edit to apply",
+                default="Blur all faces in the video" if media_type == "video" else "Blur all faces in the image",
                 required=True,
             )
 
@@ -395,8 +396,8 @@ class VLMRunChatCompletions(foo.Operator):
             inputs.str(
                 "result_field",
                 label="Result Field",
-                description="Field name to store the filepath to the edited image",
-                default="edited_image",
+                description="Field name to store the filepath to the edited media",
+                default="edited_media",
                 required=True,
             )
         else:
@@ -432,7 +433,11 @@ class VLMRunChatCompletions(foo.Operator):
         if mode == "generate":
             default_system = "You are a content generation assistant. Always return an asset."
         elif mode == "edit":
-            default_system = "You are an image editing assistant. Always return the edited image as an artifact."
+            default_system = (
+                "You are a video editing assistant. Always return the edited video as an artifact."
+                if media_type == "video"
+                else "You are an image editing assistant. Always return the edited image as an artifact."
+            )
         elif mode == "annotate":
             default_system = ""
         else:
@@ -445,32 +450,53 @@ class VLMRunChatCompletions(foo.Operator):
             required=False,
         )
 
-        # Toolsets override (for non-generate modes — generate has its own dropdown)
-        if mode != "generate":
-            if mode == "annotate":
-                toolsets_default = "viz"
-            elif mode == "edit":
-                toolsets_default = "video" if media_type == "video" else "image"
+        # Toolsets — checkboxes filtered by mode and media type
+        # For unknown/None media types, show all available toolsets
+        if mode == "generate":
+            toolsets_default = "video" if media_type == "video" else "image-gen"
+            if show_all:
+                available_toolsets = ["image-gen", "video", "core", "web"]
+            elif media_type == "video":
+                available_toolsets = ["video", "core", "web"]
             else:
-                # Analyze mode
-                toolsets_default = "video" if media_type == "video" else "core"
-
-            # Build available toolsets description based on media type
-            if media_type == "video":
-                available_toolsets = "core, video, web"
+                available_toolsets = ["image-gen", "video", "core", "web"]
+        elif mode == "edit":
+            toolsets_default = "video" if media_type == "video" else "image-gen"
+            if show_all:
+                available_toolsets = ["image-gen", "video", "image", "document", "core", "web"]
+            elif media_type == "video":
+                available_toolsets = ["video", "core", "web"]
             else:
-                available_toolsets = "core, viz, image, video, document, web, image-gen"
+                available_toolsets = ["image-gen", "image", "document", "core", "web"]
+        elif mode == "annotate":
+            toolsets_default = "viz"
+            available_toolsets = ["viz", "core", "image", "document"]
+        else:
+            # Analyze mode
+            toolsets_default = "video" if media_type == "video" else "core"
+            if show_all:
+                available_toolsets = ["core", "image", "video", "document", "web"]
+            elif media_type == "video":
+                available_toolsets = ["core", "video", "web"]
+            else:
+                available_toolsets = ["core", "image", "document", "web"]
 
-            inputs.str(
-                "toolsets",
-                label="Toolsets (Optional)",
-                description=(
-                    "Comma-separated toolsets to use. "
-                    f"Default: '{toolsets_default}'. "
-                    f"Available: {available_toolsets}"
-                ),
-                default=toolsets_default,
-                required=False,
+        default_toolsets = [toolsets_default]
+
+        inputs.view(
+            "toolsets_header",
+            types.Header(
+                label="Toolsets",
+                description="Select which toolsets to enable",
+            ),
+        )
+        for ts in available_toolsets:
+            desc = TOOLSET_DESCRIPTIONS.get(ts, "")
+            inputs.bool(
+                f"toolset_{ts.replace('-', '_')}",
+                label=f"{ts} — {desc}" if desc else ts,
+                default=(ts in default_toolsets),
+                view=types.CheckboxView(),
             )
 
         if mode in ("analyze", "annotate", "edit"):
@@ -481,23 +507,6 @@ class VLMRunChatCompletions(foo.Operator):
                 description="Limit number of samples to process (leave empty for all)",
                 required=False,
             )
-
-        if mode == "analyze":
-            # Option to save generated artifacts as new samples
-            inputs.bool(
-                "save_generated_artifacts",
-                label="Save Generated Artifacts",
-                description="If enabled, any artifacts generated by the model (images, videos, etc.) will be saved and added as new samples to the dataset.",
-                default=False,
-            )
-
-        # VLM Run metadata (optional, all modes)
-        inputs.str(
-            "vlmrun_domain",
-            label="VLM Run Domain (Optional)",
-            description="Domain hint for the VLM Run API (e.g., 'image.analysis')",
-            required=False,
-        )
 
         return types.Property(
             inputs, view=types.View(label="Chat Completions (Orion)")
@@ -534,7 +543,7 @@ class VLMRunChatCompletions(foo.Operator):
 
     @staticmethod
     def _parse_toolsets(ctx, default: str) -> List[str]:
-        """Parse toolsets from comma-separated string parameter.
+        """Parse toolsets from checkbox boolean parameters.
 
         Args:
             ctx: The execution context.
@@ -543,8 +552,15 @@ class VLMRunChatCompletions(foo.Operator):
         Returns:
             List of toolset strings.
         """
-        raw = ctx.params.get("toolsets", default) or default
-        return [t.strip() for t in raw.split(",") if t.strip()]
+        selected = []
+        for ts in ALL_TOOLSETS:
+            param_name = f"toolset_{ts.replace('-', '_')}"
+            val = ctx.params.get(param_name)
+            if val is not None:
+                if val:
+                    selected.append(ts)
+            # If param doesn't exist (not shown for this media type), skip
+        return selected if selected else [default]
 
     @staticmethod
     def _build_extra_body(ctx, toolsets: List[str]) -> Dict[str, Any]:
@@ -558,12 +574,6 @@ class VLMRunChatCompletions(foo.Operator):
             Dict for the extra_body API parameter.
         """
         extra_body: Dict[str, Any] = {"toolsets": toolsets}
-
-        # Add VLM Run metadata if provided
-        domain = ctx.params.get("vlmrun_domain")
-        if domain:
-            extra_body.setdefault("vlmrun", {})["domain"] = domain
-
         return extra_body
 
     def _execute_annotate(self, ctx: foo.ExecutionContext, api_key: str) -> Dict[str, Any]:
@@ -889,7 +899,7 @@ class VLMRunChatCompletions(foo.Operator):
         temperature = ctx.params.get("temperature", 0.7)
         system_prompt = ctx.params.get("system_prompt")
         num_generations = ctx.params.get("num_generations", 1)
-        toolset = ctx.params.get("toolset", "image-gen")
+        toolsets = self._parse_toolsets(ctx, "image-gen")
         use_reference_media = ctx.params.get("use_reference_media", False)
 
         # Initialize VLM Run client
@@ -959,7 +969,7 @@ class VLMRunChatCompletions(foo.Operator):
                     model=model,
                     messages=messages,
                     temperature=temperature,
-                    extra_body=self._build_extra_body(ctx, [toolset]),
+                    extra_body=self._build_extra_body(ctx, toolsets),
                 )
 
                 # Extract artifacts from response
@@ -1103,7 +1113,7 @@ class VLMRunChatCompletions(foo.Operator):
         temperature = ctx.params.get("temperature", 0.0)
         system_prompt = ctx.params.get("system_prompt")
         max_samples = ctx.params.get("max_samples")
-        toolsets = self._parse_toolsets(ctx, "image")
+        toolsets = self._parse_toolsets(ctx, "image-gen")
 
         # Initialize VLM Run client
         try:
@@ -1321,24 +1331,7 @@ class VLMRunChatCompletions(foo.Operator):
         temperature = ctx.params.get("temperature", 0.0)
         system_prompt = ctx.params.get("system_prompt")
         max_samples = ctx.params.get("max_samples")
-        save_generated_artifacts = ctx.params.get("save_generated_artifacts", False)
         toolsets = self._parse_toolsets(ctx, "core")
-
-        # Auto-determine output directory for generated artifacts
-        output_dir = None
-        if save_generated_artifacts:
-            # Try to find a sensible default based on dataset samples
-            first_sample = ctx.dataset.first()
-            if first_sample and first_sample.filepath:
-                # Create a 'generated' subdirectory next to the source samples
-                source_dir = Path(first_sample.filepath).parent
-                output_dir = source_dir / "generated_outputs"
-            else:
-                # Fallback to a temp directory with dataset name
-                import tempfile
-                output_dir = Path(tempfile.gettempdir()) / f"fiftyone_generated_{ctx.dataset.name}"
-
-            output_dir.mkdir(parents=True, exist_ok=True)
 
         # Get samples - prioritize selected samples if any
         if ctx.selected:
@@ -1384,7 +1377,6 @@ class VLMRunChatCompletions(foo.Operator):
         )
 
         processed = 0
-        generated_samples = 0
         errors = []
 
         with fou.ProgressBar(total=total_samples) as pb:
@@ -1440,22 +1432,6 @@ class VLMRunChatCompletions(foo.Operator):
                     sample.save()
                     processed += 1
 
-                    # Extract output artifacts and add as new samples if output_dir is provided
-                    if output_dir:
-                        saved_artifacts = self._extract_output_artifacts(
-                            response, client, sample, output_dir, errors
-                        )
-                        for artifact_path in saved_artifacts:
-                            # Create new sample for the generated artifact
-                            new_sample = fo.Sample(filepath=artifact_path)
-                            new_sample.tags.append("vlmrun_generated")
-                            new_sample["source_sample_id"] = str(sample.id)
-                            new_sample["source_filepath"] = sample.filepath
-                            new_sample["generated_by"] = "vlmrun_chat_completions"
-                            new_sample["prompt"] = prompt
-                            ctx.dataset.add_sample(new_sample)
-                            generated_samples += 1
-
                 except Exception as e:
                     error_msg = f"Failed to process {os.path.basename(sample.filepath)}: {str(e)}"
                     errors.append(error_msg)
@@ -1472,10 +1448,6 @@ class VLMRunChatCompletions(foo.Operator):
             "total": total_samples,
             "errors": len(errors),
         }
-
-        if generated_samples > 0:
-            result["generated_samples"] = generated_samples
-            result["output_directory"] = str(output_dir)
 
         if errors:
             result["error_details"] = errors[:MAX_ERROR_DETAILS]
@@ -1501,143 +1473,6 @@ class VLMRunChatCompletions(foo.Operator):
             "type": "input_file",
             "file_id": uploaded_file.id
         }
-
-    def _extract_output_artifacts(
-        self,
-        response: Any,
-        client: Any,
-        source_sample: fo.Sample,
-        output_dir: Path,
-        errors: list,
-    ) -> list:
-        """Extract and save any output artifacts from the response.
-
-        Detects artifact references (img_XXXXXX, vid_XXXXXX, etc.) in the response
-        content, downloads them using the artifacts API, and saves them to disk.
-
-        Args:
-            response: The API response containing potential artifact refs.
-            client: VLMRun client for downloading artifacts.
-            source_sample: The original sample that generated this output.
-            output_dir: Directory to save output artifacts.
-            errors: List to append any errors to for reporting.
-
-        Returns:
-            List of file paths to saved artifacts.
-        """
-        import re
-        import shutil
-
-        saved_artifacts = []
-
-        # Get response content
-        if not hasattr(response, "choices") or not response.choices:
-            return saved_artifacts
-
-        content = response.choices[0].message.content or ""
-        session_id = getattr(response, "session_id", None)
-
-        if not session_id:
-            return saved_artifacts
-
-        # Find all artifact references (pattern: type_XXXXXX where type is img, vid, url, spz, recon, etc.)
-        artifact_refs = re.findall(r'(?:img|vid|aud|doc|url|spz|recon)_[a-zA-Z0-9]{6}', content)
-
-        if not artifact_refs:
-            # Log what we searched through for debugging
-            if content and len(content) > 0:
-                errors.append(f"No artifacts found in response for {Path(source_sample.filepath).name}. Response preview: {content[:200]}...")
-            return saved_artifacts
-
-        # Ensure output directory exists
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Map artifact type prefixes to file extensions
-        extension_map = {
-            "img": ".png",
-            "vid": ".mp4",
-            "aud": ".mp3",
-            "doc": ".pdf",
-            "spz": ".spz",
-            "recon": ".spz",  # 3D reconstruction returns SPZ format
-        }
-
-        for artifact_ref in artifact_refs:
-            try:
-                # Download the artifact with retry (some artifacts take time to process)
-                artifact = self._get_artifact_with_retry(
-                    client=client,
-                    session_id=session_id,
-                    artifact_ref=artifact_ref,
-                )
-
-                # Determine file extension based on artifact type
-                artifact_type = artifact_ref.split("_")[0]
-
-                # For URL types, try to detect extension from the URL itself
-                if artifact_type == "url" and hasattr(artifact, "__str__"):
-                    url_str = str(artifact)
-                    from urllib.parse import urlparse
-                    url_path = urlparse(url_str).path
-                    extension = Path(url_path).suffix or ".bin"
-                else:
-                    extension = extension_map.get(artifact_type, ".bin")
-
-                # Generate filename based on source sample and artifact ID
-                source_name = Path(source_sample.filepath).stem
-                output_path = output_dir / f"{source_name}_{artifact_ref}{extension}"
-
-                # Save the artifact - handle different types
-                import urllib.request
-
-                if isinstance(artifact, str):
-                    if Path(artifact).exists():
-                        # Artifact is a path to a cached file - copy it
-                        shutil.copy2(artifact, output_path)
-                    elif artifact.startswith(("http://", "https://")):
-                        # URL - download it
-                        urllib.request.urlretrieve(str(artifact), str(output_path))
-                    else:
-                        errors.append(f"Unknown string artifact: {artifact[:100]}")
-                        continue
-                elif isinstance(artifact, Path) and artifact.exists():
-                    # Artifact is a Path object - copy it
-                    shutil.copy2(str(artifact), output_path)
-                elif hasattr(artifact, "save"):
-                    # PIL Image or similar object with save method
-                    artifact.save(str(output_path))
-                elif isinstance(artifact, bytes):
-                    # Raw bytes
-                    with open(output_path, "wb") as f:
-                        f.write(artifact)
-                elif hasattr(artifact, "read"):
-                    # File-like object
-                    with open(output_path, "wb") as f:
-                        f.write(artifact.read())
-                elif hasattr(artifact, "content"):
-                    # Response-like object with content attribute
-                    with open(output_path, "wb") as f:
-                        f.write(artifact.content)
-                elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
-                    # Pydantic URL type
-                    urllib.request.urlretrieve(str(artifact), str(output_path))
-                else:
-                    errors.append(f"Unknown artifact type: {type(artifact)}")
-                    continue
-
-                # Convert SPZ to PLY for FiftyOne 3D support
-                if artifact_type in ("spz", "recon") and str(output_path).endswith(".spz"):
-                    ply_path = self._convert_spz_to_ply(output_path, errors)
-                    if ply_path:
-                        output_path = ply_path
-
-                saved_artifacts.append(str(output_path))
-
-            except Exception as e:
-                # Log artifact download errors for debugging
-                errors.append(f"Failed to save artifact {artifact_ref}: {str(e)}")
-
-        return saved_artifacts
 
     def _get_artifact_with_retry(
         self,
@@ -1861,10 +1696,6 @@ class VLMRunChatCompletions(foo.Operator):
                 outputs.int("processed", label="Samples Processed")
             if "total" in ctx.results:
                 outputs.int("total", label="Total Samples")
-            if "generated_samples" in ctx.results:
-                outputs.int("generated_samples", label="Generated Artifacts Added")
-            if "output_directory" in ctx.results:
-                outputs.str("output_directory", label="Output Directory")
             if "errors" in ctx.results:
                 outputs.int("errors", label="Errors")
             if "error" in ctx.results:
@@ -1876,13 +1707,10 @@ class VLMRunChatCompletions(foo.Operator):
 
             # Success message for analyze mode
             if ctx.results.get("processed", 0) > 0:
-                generated_msg = ""
-                if ctx.results.get("generated_samples", 0) > 0:
-                    generated_msg = f" Added {ctx.results.get('generated_samples')} generated artifact(s) as new samples."
                 outputs.str(
                     "success_msg",
                     label="Success",
-                    default=f"Successfully processed {ctx.results.get('processed')} sample(s) with chat completions. Check the '{ctx.params.get('result_field', 'chat_response')}' field in your samples.{generated_msg}",
+                    default=f"Successfully processed {ctx.results.get('processed')} sample(s) with chat completions. Check the '{ctx.params.get('result_field', 'chat_response')}' field in your samples.",
                     view=types.Notice(variant="success"),
                 )
 
