@@ -70,6 +70,7 @@ if __name__ == "__main__" or "test" in sys.argv[0]:
     from object_detection import VLMRunObjectDetection
     from person_detection import VLMRunPersonDetection
     from layout_detection import VLMRunLayoutDetection
+    from chat_completions import VLMRunChatCompletions
 else:
     # Package imports for normal use
     try:
@@ -79,6 +80,7 @@ else:
         from .object_detection import VLMRunObjectDetection
         from .person_detection import VLMRunPersonDetection
         from .layout_detection import VLMRunLayoutDetection
+        from .chat_completions import VLMRunChatCompletions
     except ImportError:
         # Fallback to direct imports
         from video_transcription import VLMRunTranscribeVideo
@@ -87,6 +89,7 @@ else:
         from object_detection import VLMRunObjectDetection
         from person_detection import VLMRunPersonDetection
         from layout_detection import VLMRunLayoutDetection
+        from chat_completions import VLMRunChatCompletions
 
 
 def register(plugin):
@@ -97,3 +100,4 @@ def register(plugin):
     plugin.register(VLMRunObjectDetection)
     plugin.register(VLMRunPersonDetection)
     plugin.register(VLMRunLayoutDetection)
+    plugin.register(VLMRunChatCompletions)

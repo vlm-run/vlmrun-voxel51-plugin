@@ -3,8 +3,6 @@
 A plugin that provides operators for extracting structured data from visual
 sources using [VLM Run](https://vlm.run)'s vision-language models.
 
-![VLM Run Plugin Demo](gifs/plugin_overview.gif)
-
 ## Installation
 
 ```shell
@@ -27,7 +25,7 @@ locally.
 Set your VLM Run API key as an environment variable:
 
 ```shell
-export VLM_API_KEY="your-api-key-here"
+export VLMRUN_API_KEY="your-api-key-here"
 ```
 
 You can obtain an API key from [vlm.run](https://app.vlm.run/dashboard/settings/api-keys).
@@ -54,7 +52,75 @@ session = fo.launch_app(dataset)
 
 ## Operators
 
-### object_detection
+### vlmrun_chat_completions
+
+Flexible media analysis and content generation using VLM Run's Orion chat
+completions API with natural language prompts.
+
+**How to use:**
+
+1. Press `` ` `` or click `Browse operations` to open the operator list
+2. Search for "Chat Completions" and select it
+3. Choose a mode, enter your prompt, and click **Execute**
+
+The operator automatically detects your dataset's media type (image, video, or
+document) and filters the available modes and toolsets to only show compatible
+options.
+
+**Modes:**
+
+- **Analyze** — Describe, caption, or extract information from your media using
+  natural language prompts. Results are stored as text in a sample field, along
+  with model and usage metadata fields. Works with images, videos, and PDFs.
+
+- **Annotate** — Produce spatial annotations: bounding boxes (Detections),
+  keypoints, or segmentation masks. Results are stored as native FiftyOne label
+  types. Available for image and document datasets (not video).
+
+- **Edit** — Modify existing media with natural language instructions (e.g.,
+  "Blur all faces", "Trim to the first 5 seconds"). Edited files are saved and
+  added to the dataset with the `vlmrun_edited` tag.
+
+- **Generate** — Create new images or videos from text prompts (no input media
+  required). Supports generating multiple outputs at once. Generated files are
+  saved and added to the dataset with the `vlmrun_generated` tag.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| Model | `fast` (speed), `auto` (default), or `pro` (complex tasks) |
+| Prompt | Natural language instruction for the task |
+| Output Type | Type of spatial annotation to produce: Detections, Keypoints, or Segmentation masks (Annotate mode only) |
+| Result Field | Field name to store the output (default varies by mode) |
+| Temperature | Controls randomness (0 = deterministic, 1 = creative) |
+| System Prompt | Optional context-setting prompt |
+| Toolsets | Select which tool categories to enable (filtered by media type) |
+| Number of Generations | How many items to generate (Generate mode only) |
+| Max Samples | Limit number of samples to process |
+
+**Media type filtering:**
+
+| Dataset Type | Available Modes | Generate Toolset |
+|-------------|----------------|-----------------|
+| Image | Analyze, Annotate, Edit, Generate | Image Generation |
+| Video | Analyze, Edit, Generate | Video |
+| Document/PDF | Analyze, Annotate, Edit, Generate | Image Generation |
+
+**Additional features:**
+- Select specific samples before opening the operator to process only those
+- Artifacts (images, videos, audio, documents) are automatically downloaded
+  and added as new dataset samples
+
+---
+
+### Additional Operators
+
+![VLM Run Plugin Demo](gifs/plugin_overview.gif)
+
+**Detection Operators**
+
+#### object_detection
 
 Detect and localize common objects in images with bounding box coordinates.
 
@@ -78,7 +144,7 @@ The operator adds detections to your dataset with:
 - Confidence scores for each detection
 - Object labels
 
-### person_detection
+#### person_detection
 
 Specialized person detection with enhanced accuracy for human-centric
 applications.
@@ -100,28 +166,9 @@ Features:
 - Optimized for challenging scenarios (crowds, occlusions)
 - Precise bounding boxes with confidence scores
 
-### document_analysis
+**Document Operators**
 
-Extract text and analyze document structure from PDFs and images.
-
-This operator leverages VLM Run's document analysis capabilities:
-
-```py
-# Analyze document structure and extract text
-client.run(
-    "document.analysis",
-    document_path,
-    grounding=True
-)
-```
-
-The operator extracts:
-- Text content with spatial coordinates
-- Document structure (headers, paragraphs, sections)
-- Tables and figures with bounding boxes
-- Reading order information
-
-### invoice_parsing
+#### invoice_parsing
 
 Extract structured data from invoice documents with field-level visual
 grounding.
@@ -144,7 +191,7 @@ Extracts:
 - Tax and discount information
 - Visual grounding for each extracted field (optional)
 
-### layout_detection
+#### layout_detection
 
 Analyze document layout and identify structural elements with precise
 localization.
@@ -169,7 +216,9 @@ Identifies:
 
 ![Layout Detection Example](img/layout_detection.jpg)
 
-### video_transcription
+**Video Operators**
+
+#### video_transcription
 
 Transcribe audio and analyze video content with multiple analysis modes.
 
@@ -215,11 +264,8 @@ document elements directly on your images.
 
 ## Execution Modes
 
-All operators support two execution modes:
-
-- **Immediate**: Process immediately in the FiftyOne App (default)
-- **Delegated**: Queue for background processing (requires
-  [orchestrator setup](https://docs.voxel51.com/plugins/using_plugins.html#delegating-plugin-operations))
+All operators run in immediate execution mode, processing directly in the
+FiftyOne App.
 
 ## Learn More
 

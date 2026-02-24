@@ -26,6 +26,7 @@ operators:
   - vlmrun_layout_detection
   - vlmrun_transcribe_video
   - vlmrun_caption_images
+  - vlmrun_chat_completions
 
 fiftyone:
   version: ">=0.20.0"
