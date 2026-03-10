@@ -1138,9 +1138,10 @@ class VLMRunChatCompletions(foo.Operator):
         )
 
         # Determine output artifact types based on toolsets
-        output_artifact_types = ["image"]
+        # Use plural types to allow multiple artifacts in the response
+        output_artifact_types = ["images"]
         if "video" in toolsets:
-            output_artifact_types = ["video"]
+            output_artifact_types = ["videos"]
 
         # Get samples
         if ctx.selected:
@@ -1229,15 +1230,15 @@ class VLMRunChatCompletions(foo.Operator):
 
                     # Parse artifact IDs from content
                     artifact_ids = _parse_artifact_ids(content, output_artifact_types)
-                    object_id = artifact_ids.get(output_artifact_types[0])
+                    object_ids = artifact_ids.get(output_artifact_types[0])
 
-                    if not object_id:
+                    if not object_ids:
                         # Fallback: search for artifact refs via regex
                         refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
                         if refs:
-                            object_id = refs[0]
+                            object_ids = refs
 
-                    if not object_id:
+                    if not object_ids:
                         errors.append(
                             f"No edited artifact produced for {Path(sample.filepath).name}. "
                             f"Response: {content[:200]}"
@@ -1245,58 +1246,66 @@ class VLMRunChatCompletions(foo.Operator):
                         pb.update()
                         continue
 
-                    # Download the artifact
-                    artifact = self._get_artifact_with_retry(
-                        client=client,
-                        session_id=session_id,
-                        artifact_ref=object_id,
-                    )
+                    # Normalize to list
+                    if isinstance(object_ids, str):
+                        object_ids = [object_ids]
 
-                    # Save to disk - determine extension from artifact type
-                    artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
                     ext_map = {"img": ".png", "vid": ".mp4", "aud": ".mp3", "doc": ".pdf", "spz": ".spz", "recon": ".spz"}
-                    ext = ext_map.get(artifact_type, ".png")
                     source_name = Path(sample.filepath).stem
-                    output_path = output_dir / f"{source_name}_{object_id}{ext}"
+                    output_paths = []
 
-                    if isinstance(artifact, str):
-                        if Path(artifact).exists():
-                            shutil.copy2(artifact, output_path)
-                        elif artifact.startswith(("http://", "https://")):
+                    for object_id in object_ids:
+                        # Download the artifact
+                        artifact = self._get_artifact_with_retry(
+                            client=client,
+                            session_id=session_id,
+                            artifact_ref=object_id,
+                        )
+
+                        # Save to disk - determine extension from artifact type
+                        artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
+                        ext = ext_map.get(artifact_type, ".png")
+                        output_path = output_dir / f"{source_name}_{object_id}{ext}"
+
+                        if isinstance(artifact, str):
+                            if Path(artifact).exists():
+                                shutil.copy2(artifact, output_path)
+                            elif artifact.startswith(("http://", "https://")):
+                                import urllib.request
+                                urllib.request.urlretrieve(str(artifact), str(output_path))
+                            else:
+                                errors.append(f"Unknown string artifact: {artifact[:100]}")
+                                continue
+                        elif isinstance(artifact, Path) and artifact.exists():
+                            shutil.copy2(str(artifact), output_path)
+                        elif hasattr(artifact, "save"):
+                            artifact.save(str(output_path))
+                        elif isinstance(artifact, bytes):
+                            with open(output_path, "wb") as f:
+                                f.write(artifact)
+                        elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
                             import urllib.request
                             urllib.request.urlretrieve(str(artifact), str(output_path))
                         else:
-                            errors.append(f"Unknown string artifact: {artifact[:100]}")
-                            pb.update()
+                            errors.append(f"Unknown artifact type: {type(artifact)}")
                             continue
-                    elif isinstance(artifact, Path) and artifact.exists():
-                        shutil.copy2(str(artifact), output_path)
-                    elif hasattr(artifact, "save"):
-                        artifact.save(str(output_path))
-                    elif isinstance(artifact, bytes):
-                        with open(output_path, "wb") as f:
-                            f.write(artifact)
-                    elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
-                        import urllib.request
-                        urllib.request.urlretrieve(str(artifact), str(output_path))
-                    else:
-                        errors.append(f"Unknown artifact type: {type(artifact)}")
-                        pb.update()
-                        continue
 
-                    # Store filepath on the sample
-                    sample[result_field] = str(output_path)
-                    sample.save()
+                        output_paths.append(str(output_path))
 
-                    # Add edited image as a viewable sample
-                    if ctx.dataset:
-                        new_sample = fo.Sample(filepath=str(output_path))
-                        new_sample.tags.append("vlmrun_edited")
-                        new_sample["prompt"] = prompt
-                        new_sample["source_filepath"] = sample.filepath
-                        new_sample["generated_by"] = "vlmrun_chat_completions"
-                        new_sample["model"] = model
-                        ctx.dataset.add_sample(new_sample)
+                        # Add edited artifact as a viewable sample
+                        if ctx.dataset:
+                            new_sample = fo.Sample(filepath=str(output_path))
+                            new_sample.tags.append("vlmrun_edited")
+                            new_sample["prompt"] = prompt
+                            new_sample["source_filepath"] = sample.filepath
+                            new_sample["generated_by"] = "vlmrun_chat_completions"
+                            new_sample["model"] = model
+                            ctx.dataset.add_sample(new_sample)
+
+                    # Store output path(s) on the original sample
+                    if output_paths:
+                        sample[result_field] = output_paths if len(output_paths) > 1 else output_paths[0]
+                        sample.save()
 
                     processed += 1
 
