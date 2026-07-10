@@ -72,6 +72,97 @@ def _default_model() -> str:
     return os.getenv("VLMRUN_DEFAULT_MODEL") or DEFAULT_MODEL
 
 
+# Long-running-request handling. Orion runs on Modal, whose HTTP gateway closes
+# the connection after ~150s; a request that outlives that window returns
+# 303 See Other with a Location URL that serves the result once the job finishes.
+# The OpenAI client raises APIStatusError on the 303, so without this the plugin
+# would record every slow Orion op (video/document generation, large images) as a
+# failure even though it completed — and billed — server-side. Overridable via
+# VLMRUN_MAX_WAIT / VLMRUN_POLL_INTERVAL.
+DEFAULT_MAX_WAIT = 600.0
+DEFAULT_POLL_INTERVAL = 3.0
+
+
+def _poll_redirect(
+    client: Any, location: str, max_wait: float, poll_interval: float
+) -> Dict[str, Any]:
+    """Poll a 303 redirect target until the Orion completion result is ready.
+
+    The result URL long-polls (holds the connection for minutes) and, while the
+    job runs, may answer 202/204/303 or an intermittent 5xx; a read timeout on
+    the poll simply means "not done yet." Returns the parsed completion body.
+    """
+    import time
+    from urllib.parse import urljoin
+
+    import requests
+
+    url = urljoin("https://agent.vlm.run", location)
+    headers = {"Authorization": f"Bearer {client.api_key}"}
+    deadline = time.monotonic() + max_wait
+    consecutive_5xx = 0
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, timeout=120, allow_redirects=False)
+        except (requests.Timeout, requests.ConnectionError):
+            # long-poll held the connection past the read timeout — not done yet
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Orion long-running request did not complete within {max_wait}s"
+                )
+            continue
+        if resp.status_code in (200, 201) and resp.content:  # completion body is ready
+            return resp.json()
+        if resp.status_code in (202, 204, 303) or resp.status_code >= 500:
+            # 202/204/303: result not ready yet (204 = No Content is returned
+            # repeatedly while the job runs). 5xx: the poll endpoint intermittently
+            # errors mid-job; tolerate a bounded number in a row.
+            if resp.status_code >= 500:
+                consecutive_5xx += 1
+                if consecutive_5xx > 5:
+                    raise RuntimeError(
+                        f"Polling Orion request failed with status {resp.status_code}: {resp.text[:300]}"
+                    )
+            else:
+                consecutive_5xx = 0
+                if resp.status_code == 303:
+                    url = urljoin(url, resp.headers.get("location", url))
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Orion long-running request did not complete within {max_wait}s"
+                )
+            time.sleep(poll_interval)
+            continue
+        raise RuntimeError(
+            f"Polling Orion request failed with status {resp.status_code}: {resp.text[:300]}"
+        )
+
+
+def _create_completion(client: Any, **kwargs: Any) -> Any:
+    """Call ``client.agent.completions.create`` with transparent 303 handling.
+
+    Orion returns 303 for any request that outlives the ~150s Modal window; the
+    OpenAI client surfaces that as ``APIStatusError``. We catch it, poll the
+    Location URL, and rebuild a typed ``ChatCompletion`` so callers keep using
+    ``response.choices[...]`` and the ``session_id`` extra field unchanged.
+    """
+    import openai
+
+    try:
+        return client.agent.completions.create(**kwargs)
+    except openai.APIStatusError as exc:
+        location = exc.response.headers.get("location")
+        if exc.response.status_code != 303 or not location:
+            raise
+        max_wait = float(os.getenv("VLMRUN_MAX_WAIT", str(DEFAULT_MAX_WAIT)))
+        poll_interval = float(os.getenv("VLMRUN_POLL_INTERVAL", str(DEFAULT_POLL_INTERVAL)))
+        result = _poll_redirect(client, location, max_wait, poll_interval)
+
+        from openai.types.chat import ChatCompletion
+
+        return ChatCompletion.model_validate(result)
+
+
 # Supported file extensions (per VLM Run docs)
 IMAGE_EXTENSIONS = (
     ".jpg",
@@ -714,7 +805,7 @@ class VLMRunChatCompletions(foo.Operator):
                     else:
                         request_kwargs["response_format"] = {"type": "json_object"}
 
-                    response = client.agent.completions.create(**request_kwargs)
+                    response = _create_completion(client, **request_kwargs)
 
                     content = response.choices[0].message.content or ""
 
@@ -1006,7 +1097,8 @@ class VLMRunChatCompletions(foo.Operator):
                     messages.append({"role": "user", "content": prompt})
 
                 # Make the API call
-                response = client.agent.completions.create(
+                response = _create_completion(
+                    client,
                     model=model,
                     messages=messages,
                     temperature=temperature,
@@ -1259,7 +1351,7 @@ class VLMRunChatCompletions(foo.Operator):
                             }
 
                     # Make the API call
-                    response = client.agent.completions.create(**request_kwargs)
+                    response = _create_completion(client, **request_kwargs)
                     content = response.choices[0].message.content or ""
                     source_name = Path(sample.filepath).stem
 
@@ -1521,7 +1613,7 @@ class VLMRunChatCompletions(foo.Operator):
                     }
 
                     # Make the API call using Orion agent completions
-                    response = client.agent.completions.create(**request_kwargs)
+                    response = _create_completion(client, **request_kwargs)
 
                     # Extract and store the result
                     self._process_chat_result(
@@ -1583,42 +1675,63 @@ class VLMRunChatCompletions(foo.Operator):
         retry_count: int = 20,
         delay: float = 3.0,
     ) -> Any:
-        """Get an artifact from VLM Run with retry logic.
+        """Fetch an artifact's bytes from VLM Run, retrying until it's available.
 
-        Some artifacts may not be immediately available after the API
-        response. This method retries with a delay.
+        Fetches ``GET /v1/artifacts`` directly instead of the SDK's
+        ``client.artifacts.get()``. The SDK asserts the HTTP ``Content-Type``
+        matches the artifact type and raises an ``AssertionError`` when VLM Run
+        serves a mismatched type (e.g. an ``img_`` artifact sent as
+        ``application/octet-stream``); fetching the raw bytes avoids that crash.
+        Artifacts can also lag the completion response, so we poll with a delay.
 
         Args:
-            client: VLMRun client instance.
+            client: VLMRun client instance (provides ``base_url`` and ``api_key``).
             session_id: The session ID from the response.
-            artifact_ref: The artifact reference (e.g., img_abc123).
+            artifact_ref: The artifact reference (e.g., ``img_abc123``); any
+                trailing file extension is stripped.
             retry_count: Number of retries before giving up.
             delay: Delay in seconds between retries.
 
         Returns:
-            The artifact data.
+            Raw ``bytes`` for file artifacts (img/vid/doc/aud), or the URL string
+            for ``url_`` artifacts (callers download it).
 
         Raises:
-            Exception: If artifact retrieval fails after all retries.
+            RuntimeError: If retrieval fails after all retries, or on an
+                unrecoverable auth error.
         """
         import time
 
-        last_error = None
+        import requests
+
+        object_id = artifact_ref.split(".")[0]  # strip any trailing extension
+        obj_type = object_id.split("_")[0]
+        url = f"{client.base_url.rstrip('/')}/artifacts"
+        headers = {"Authorization": f"Bearer {client.api_key}"}
+        params = {"object_id": object_id, "session_id": session_id}
+
+        last_error: Any = None
         for attempt in range(retry_count):
             try:
-                return client.artifacts.get(
-                    session_id=session_id,
-                    object_id=artifact_ref,
-                )
-            except Exception as e:
+                resp = requests.get(url, headers=headers, params=params, timeout=120)
+            except Exception as e:  # transient network error — retry
                 last_error = e
-                if attempt < retry_count - 1:
-                    time.sleep(delay)
-                    continue
-                raise
+            else:
+                if resp.status_code in (401, 403):
+                    # auth failures will not resolve by waiting
+                    raise RuntimeError(
+                        f"Unauthorized fetching artifact {object_id} (HTTP {resp.status_code})"
+                    )
+                if resp.status_code == 200 and resp.content:
+                    if obj_type == "url":
+                        return resp.content.decode("utf-8", errors="replace").strip()
+                    return resp.content
+                last_error = RuntimeError(f"artifact not ready (HTTP {resp.status_code})")
+            if attempt < retry_count - 1:
+                time.sleep(delay)
 
         raise RuntimeError(
-            f"Failed to get artifact {artifact_ref} after {retry_count} retries: {last_error}"
+            f"Failed to get artifact {object_id} after {retry_count} retries: {last_error}"
         )
 
     def _process_chat_result(
