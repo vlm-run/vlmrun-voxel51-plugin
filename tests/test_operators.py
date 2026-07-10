@@ -226,7 +226,6 @@ class TestChatCompletionsIntegration:
     Inspired by VLM Run cookbooks:
     - 12_orion_image_understanding.ipynb
     - 12_orion_video_understanding.ipynb
-    - 13_orion_3d_reconstruction.ipynb
     """
 
     @pytest.fixture

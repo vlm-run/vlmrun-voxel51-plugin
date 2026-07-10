@@ -4,4 +4,3 @@ pillow>=8.0.0
 numpy>=1.20.0
 vlmrun>=0.6.5
 openai>=1.0.0
-spz @ git+https://github.com/nianticlabs/spz.git

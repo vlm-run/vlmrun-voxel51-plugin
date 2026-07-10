@@ -95,6 +95,19 @@ AUDIO_EXTENSIONS = (
 # Note: Audio is NOT supported in chat completions
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS + VIDEO_EXTENSIONS + DOCUMENT_EXTENSIONS
 
+# Video edit/tools (trim, sample, extract segments) return a URL to the edited
+# video via structured output — NOT a downloadable artifact ref. See VLM Run
+# docs: https://docs.vlm.run/agents/capabilities/video/tools
+_VIDEO_EDIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string", "description": "URL of the edited/trimmed video"},
+        "start_time": {"type": "string", "description": "Start time (HH:MM:SS.MS), if applicable"},
+        "end_time": {"type": "string", "description": "End time (HH:MM:SS.MS), if applicable"},
+    },
+    "required": ["url"],
+}
+
 # --- Vendored artifact schema helpers (from fiftyone.utils.vlmrun) ---
 # These are vendored here to avoid depending on an unreleased fiftyone util
 # and to add UrlRef/ArrayRef support.
@@ -104,7 +117,6 @@ _SINGULAR_ARTIFACT_TYPES = {
     "video": "VideoRef",
     "audio": "AudioRef",
     "document": "DocumentRef",
-    "recon": "ReconRef",
     "url": "UrlRef",
     "array": "ArrayRef",
 }
@@ -114,7 +126,6 @@ _PLURAL_ARTIFACT_TYPES = {
     "videos": ("VideoRef", "List of videos"),
     "audios": ("AudioRef", "List of audio files"),
     "documents": ("DocumentRef", "List of documents"),
-    "recons": ("ReconRef", "List of 3D reconstructions"),
     "urls": ("UrlRef", "List of URLs"),
     "arrays": ("ArrayRef", "List of arrays"),
 }
@@ -135,7 +146,6 @@ def _build_artifact_schema(output_artifacts):
         AudioRef,
         DocumentRef,
         ImageRef,
-        ReconRef,
         UrlRef,
         VideoRef,
     )
@@ -145,7 +155,6 @@ def _build_artifact_schema(output_artifacts):
         "VideoRef": VideoRef,
         "AudioRef": AudioRef,
         "DocumentRef": DocumentRef,
-        "ReconRef": ReconRef,
         "UrlRef": UrlRef,
         "ArrayRef": ArrayRef,
     }
@@ -466,7 +475,7 @@ class VLMRunChatCompletions(foo.Operator):
             default_system = "You are a content generation assistant. Always return an asset."
         elif mode == "edit":
             default_system = (
-                "You are a video editing assistant. Always return the edited video as an artifact."
+                "You are a video editing assistant. Return the edited video as a URL."
                 if media_type == "video"
                 else "You are an image editing assistant. Always return the edited image as an artifact."
             )
@@ -1012,8 +1021,8 @@ class VLMRunChatCompletions(foo.Operator):
                     errors.append(f"Generation {i+1}: No session ID in response")
                     continue
 
-                # Find all artifact references (including url_, spz_, and recon_ types)
-                artifact_refs = re.findall(r'(?:img|vid|aud|doc|url|spz|recon)_[a-zA-Z0-9]{6}', content)
+                # Find all artifact references (including url_ types)
+                artifact_refs = re.findall(r'(?:img|vid|aud|doc|url)_[a-zA-Z0-9]{6}', content)
 
                 if not artifact_refs:
                     errors.append(f"Generation {i+1}: No artifacts in response. Response: {content[:200]}")
@@ -1025,8 +1034,6 @@ class VLMRunChatCompletions(foo.Operator):
                     "vid": ".mp4",
                     "aud": ".mp3",
                     "doc": ".pdf",
-                    "spz": ".spz",
-                    "recon": ".spz",  # 3D reconstruction returns SPZ format
                 }
 
                 # Download and save each artifact
@@ -1078,12 +1085,6 @@ class VLMRunChatCompletions(foo.Operator):
                         else:
                             errors.append(f"Unknown artifact type: {type(artifact)}")
                             continue
-
-                        # Convert SPZ to PLY for FiftyOne 3D support
-                        if artifact_type in ("spz", "recon") and str(output_path).endswith(".spz"):
-                            ply_path = self._convert_spz_to_ply(output_path, errors)
-                            if ply_path:
-                                output_path = ply_path
 
                         # Add as new sample to dataset
                         if ctx.dataset:
@@ -1232,8 +1233,11 @@ class VLMRunChatCompletions(foo.Operator):
                         ],
                     })
 
-                    # Build request with toolsets and artifact schema
-                    artifact_schema = _build_artifact_schema(output_artifact_types)
+                    # Video tools (trim/sample/segment) return a URL to the edited
+                    # video via structured output; image edits return an artifact
+                    # ref that must be downloaded via artifacts.get.
+                    is_video = file_path.suffix.lower() in VIDEO_EXTENSIONS
+
                     request_kwargs: Dict[str, Any] = {
                         "model": model,
                         "messages": messages,
@@ -1241,80 +1245,145 @@ class VLMRunChatCompletions(foo.Operator):
                         "extra_body": self._build_extra_body(ctx, toolsets),
                     }
 
-                    if artifact_schema:
+                    if is_video:
                         request_kwargs["response_format"] = {
                             "type": "json_schema",
-                            "schema": artifact_schema,
+                            "schema": _VIDEO_EDIT_SCHEMA,
                         }
+                    else:
+                        artifact_schema = _build_artifact_schema(output_artifact_types)
+                        if artifact_schema:
+                            request_kwargs["response_format"] = {
+                                "type": "json_schema",
+                                "schema": artifact_schema,
+                            }
 
                     # Make the API call
                     response = client.agent.completions.create(**request_kwargs)
-
-                    # Extract content and session_id
                     content = response.choices[0].message.content or ""
-                    session_id = getattr(response, "session_id", None)
+                    source_name = Path(sample.filepath).stem
 
-                    if not session_id:
-                        # Try model_extra fallback
-                        if hasattr(response, "model_extra"):
+                    if is_video:
+                        # Video tools return a JSON pointer to the edited video in
+                        # one of two forms — a direct URL, or an artifact id (e.g.
+                        # vid_abc123, sometimes suffixed .mp4). The API picks which;
+                        # handle both and download the bytes to a local file.
+                        import urllib.request
+
+                        pointer = None
+                        try:
+                            data = json.loads(content)
+                            if isinstance(data, dict):
+                                pointer = data.get("url") or data.get("video_url")
+                        except (json.JSONDecodeError, TypeError):
+                            pointer = None
+                        if not pointer:
+                            match = re.search(
+                                r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', content
+                            )
+                            pointer = match.group(0) if match else None
+                        if not pointer:
+                            match = re.search(r'(?:vid|img)_[a-zA-Z0-9]{6}', content)
+                            pointer = match.group(0) if match else None
+
+                        if not pointer:
+                            errors.append(
+                                f"No edited video URL or artifact returned for {Path(sample.filepath).name}. "
+                                f"Response: {content[:200]}"
+                            )
+                            pb.update()
+                            continue
+
+                        output_path = output_dir / f"{source_name}_edited.mp4"
+
+                        if pointer.startswith(("http://", "https://")):
+                            # Form 1: direct download URL
+                            urllib.request.urlretrieve(pointer, str(output_path))
+                        else:
+                            # Form 2: artifact id (strip any trailing extension,
+                            # e.g. vid_abc123.mp4) -> exchange for bytes.
+                            artifact_ref = pointer.split(".")[0]
+                            session_id = getattr(response, "session_id", None)
+                            if not session_id and hasattr(response, "model_extra"):
+                                session_id = response.model_extra.get("session_id")
+                            artifact = self._get_artifact_with_retry(
+                                client=client,
+                                session_id=session_id,
+                                artifact_ref=artifact_ref,
+                            )
+                            if isinstance(artifact, Path) and artifact.exists():
+                                shutil.copy2(str(artifact), output_path)
+                            elif isinstance(artifact, str) and Path(artifact).exists():
+                                shutil.copy2(artifact, output_path)
+                            elif isinstance(artifact, str) and artifact.startswith(("http://", "https://")):
+                                urllib.request.urlretrieve(artifact, str(output_path))
+                            elif isinstance(artifact, bytes):
+                                with open(output_path, "wb") as f:
+                                    f.write(artifact)
+                            else:
+                                errors.append(
+                                    f"Unknown video artifact type: {type(artifact)}"
+                                )
+                                pb.update()
+                                continue
+                    else:
+                        session_id = getattr(response, "session_id", None)
+                        if not session_id and hasattr(response, "model_extra"):
                             session_id = response.model_extra.get("session_id")
 
-                    # Parse artifact IDs from content
-                    artifact_ids = _parse_artifact_ids(content, output_artifact_types)
-                    object_id = artifact_ids.get(output_artifact_types[0])
+                        # Parse artifact IDs from content
+                        artifact_ids = _parse_artifact_ids(content, output_artifact_types)
+                        object_id = artifact_ids.get(output_artifact_types[0])
 
-                    if not object_id:
-                        # Fallback: search for artifact refs via regex
-                        refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
-                        if refs:
-                            object_id = refs[0]
+                        if not object_id:
+                            refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
+                            if refs:
+                                object_id = refs[0]
 
-                    if not object_id:
-                        errors.append(
-                            f"No edited artifact produced for {Path(sample.filepath).name}. "
-                            f"Response: {content[:200]}"
+                        if not object_id:
+                            errors.append(
+                                f"No edited artifact produced for {Path(sample.filepath).name}. "
+                                f"Response: {content[:200]}"
+                            )
+                            pb.update()
+                            continue
+
+                        # Download the artifact
+                        artifact = self._get_artifact_with_retry(
+                            client=client,
+                            session_id=session_id,
+                            artifact_ref=object_id,
                         )
-                        pb.update()
-                        continue
 
-                    # Download the artifact
-                    artifact = self._get_artifact_with_retry(
-                        client=client,
-                        session_id=session_id,
-                        artifact_ref=object_id,
-                    )
+                        artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
+                        ext_map = {"img": ".png", "vid": ".mp4", "aud": ".mp3", "doc": ".pdf"}
+                        ext = ext_map.get(artifact_type, ".png")
+                        output_path = output_dir / f"{source_name}_{object_id}{ext}"
 
-                    # Save to disk - determine extension from artifact type
-                    artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
-                    ext_map = {"img": ".png", "vid": ".mp4", "aud": ".mp3", "doc": ".pdf", "spz": ".spz", "recon": ".spz"}
-                    ext = ext_map.get(artifact_type, ".png")
-                    source_name = Path(sample.filepath).stem
-                    output_path = output_dir / f"{source_name}_{object_id}{ext}"
-
-                    if isinstance(artifact, str):
-                        if Path(artifact).exists():
-                            shutil.copy2(artifact, output_path)
-                        elif artifact.startswith(("http://", "https://")):
+                        if isinstance(artifact, str):
+                            if Path(artifact).exists():
+                                shutil.copy2(artifact, output_path)
+                            elif artifact.startswith(("http://", "https://")):
+                                import urllib.request
+                                urllib.request.urlretrieve(str(artifact), str(output_path))
+                            else:
+                                errors.append(f"Unknown string artifact: {artifact[:100]}")
+                                pb.update()
+                                continue
+                        elif isinstance(artifact, Path) and artifact.exists():
+                            shutil.copy2(str(artifact), output_path)
+                        elif hasattr(artifact, "save"):
+                            artifact.save(str(output_path))
+                        elif isinstance(artifact, bytes):
+                            with open(output_path, "wb") as f:
+                                f.write(artifact)
+                        elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
                             import urllib.request
                             urllib.request.urlretrieve(str(artifact), str(output_path))
                         else:
-                            errors.append(f"Unknown string artifact: {artifact[:100]}")
+                            errors.append(f"Unknown artifact type: {type(artifact)}")
                             pb.update()
                             continue
-                    elif isinstance(artifact, Path) and artifact.exists():
-                        shutil.copy2(str(artifact), output_path)
-                    elif hasattr(artifact, "save"):
-                        artifact.save(str(output_path))
-                    elif isinstance(artifact, bytes):
-                        with open(output_path, "wb") as f:
-                            f.write(artifact)
-                    elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
-                        import urllib.request
-                        urllib.request.urlretrieve(str(artifact), str(output_path))
-                    else:
-                        errors.append(f"Unknown artifact type: {type(artifact)}")
-                        pb.update()
-                        continue
 
                     # Store filepath on the sample
                     sample[result_field] = str(output_path)
@@ -1516,13 +1585,13 @@ class VLMRunChatCompletions(foo.Operator):
     ) -> Any:
         """Get an artifact from VLM Run with retry logic.
 
-        Some artifacts (especially 3D reconstructions) may not be immediately
-        available after the API response. This method retries with a delay.
+        Some artifacts may not be immediately available after the API
+        response. This method retries with a delay.
 
         Args:
             client: VLMRun client instance.
             session_id: The session ID from the response.
-            artifact_ref: The artifact reference (e.g., recon_abc123).
+            artifact_ref: The artifact reference (e.g., img_abc123).
             retry_count: Number of retries before giving up.
             delay: Delay in seconds between retries.
 
@@ -1551,55 +1620,6 @@ class VLMRunChatCompletions(foo.Operator):
         raise RuntimeError(
             f"Failed to get artifact {artifact_ref} after {retry_count} retries: {last_error}"
         )
-
-    def _convert_spz_to_ply(
-        self, spz_path: Path, errors: list
-    ) -> Optional[Path]:
-        """Convert SPZ Gaussian Splat file to PLY format for FiftyOne.
-
-        Uses the spz library from Niantic Labs to convert SPZ files to PLY.
-        FiftyOne supports PLY files for 3D visualization.
-
-        Args:
-            spz_path: Path to the SPZ file.
-            errors: List to append any errors to.
-
-        Returns:
-            Path to the converted PLY file, or None if conversion failed.
-        """
-        try:
-            import spz as spz_lib
-
-            # Load SPZ file
-            unpack_options = spz_lib.UnpackOptions()
-            cloud = spz_lib.load_spz(str(spz_path), unpack_options)
-
-            if cloud.num_points == 0:
-                errors.append(f"SPZ file is empty: {spz_path}")
-                return None
-
-            # Save to PLY file
-            pack_options = spz_lib.PackOptions()
-            ply_path = Path(str(spz_path).replace(".spz", ".ply"))
-            success = spz_lib.save_splat_to_ply(cloud, pack_options, str(ply_path))
-
-            if success:
-                # Remove the original SPZ file
-                spz_path.unlink()
-                return ply_path
-            else:
-                errors.append(f"Failed to convert SPZ to PLY: {spz_path}")
-                return None
-
-        except ImportError:
-            errors.append(
-                "SPZ library not installed. Install with: "
-                "pip install git+https://github.com/nianticlabs/spz.git"
-            )
-            return None
-        except Exception as e:
-            errors.append(f"SPZ to PLY conversion failed: {str(e)}")
-            return None
 
     def _process_chat_result(
         self,
