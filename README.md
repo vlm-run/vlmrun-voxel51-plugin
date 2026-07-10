@@ -55,7 +55,8 @@ session = fo.launch_app(dataset)
 ### vlmrun_chat_completions
 
 Flexible media analysis and content generation using VLM Run's Orion chat
-completions API with natural language prompts.
+completions API with natural language prompts. Defaults to the Orion 2 model
+family (code-execution agents); Orion 1 remains selectable.
 
 **How to use:**
 
@@ -89,7 +90,7 @@ options.
 
 | Option | Description |
 |--------|-------------|
-| Model | `fast` (speed), `auto` (default), or `pro` (complex tasks) |
+| Model | Orion 2 (default) or Orion 1 variant — `fast` (speed), `auto` (default), or `pro` (complex tasks) |
 | Prompt | Natural language instruction for the task |
 | Output Type | Type of spatial annotation to produce: Detections, Keypoints, or Segmentation masks (Annotate mode only) |
 | Result Field | Field name to store the output (default varies by mode) |

@@ -45,14 +45,32 @@ TOOLSET_DESCRIPTIONS = {
 }
 
 # Default model
-DEFAULT_MODEL = "vlmrun-orion-1:auto"
+DEFAULT_MODEL = "vlmrun-orion-2:auto"
 
-# Available Orion models
+# Available Orion models. Orion 2 (code-execution agents) is listed first and
+# is the default; Orion 1 (tool-calling agents) is retained for backward
+# compatibility. Both share the same OpenAI-compatible chat-completions
+# response contract, so selecting either works with the same code paths.
 ORION_MODELS = [
-    ("vlmrun-orion-1:fast", "Fast - Optimized for simple tasks with speed"),
-    ("vlmrun-orion-1:auto", "Auto - Automatically selects best model for task"),
-    ("vlmrun-orion-1:pro", "Pro - Most capable for complex multi-step workflows"),
+    ("vlmrun-orion-2:fast", "Orion 2 Fast - Optimized for simple tasks with speed"),
+    ("vlmrun-orion-2:auto", "Orion 2 Auto - Automatically selects best model for task"),
+    ("vlmrun-orion-2:pro", "Orion 2 Pro - Most capable for complex workflows"),
+    ("vlmrun-orion-1:fast", "Orion 1 Fast - Optimized for simple tasks with speed"),
+    ("vlmrun-orion-1:auto", "Orion 1 Auto - Automatically selects best model for task"),
+    ("vlmrun-orion-1:pro", "Orion 1 Pro - Most capable for complex workflows"),
 ]
+
+
+def _default_model() -> str:
+    """Return the effective default model.
+
+    Overridable via the ``VLMRUN_DEFAULT_MODEL`` environment variable so users
+    can pin a model (e.g. an Orion 1 variant, or a pinned backend variant) —
+    and opt out of the Orion 2 default — without editing code. Falls back to
+    ``DEFAULT_MODEL``.
+    """
+    return os.getenv("VLMRUN_DEFAULT_MODEL") or DEFAULT_MODEL
+
 
 # Supported file extensions (per VLM Run docs)
 IMAGE_EXTENSIONS = (
@@ -224,7 +242,11 @@ class VLMRunChatCompletions(foo.Operator):
             label="VLM Run: Chat Completions (Orion)",
             dynamic=True,
             allow_immediate_execution=True,
-            allow_delegated_execution=False,
+            # Long Orion operations (video edit/generation, document redaction)
+            # can exceed the synchronous execution limit; allow users to run
+            # them as delegated (background) jobs. The operator already handles
+            # ctx.delegated throughout execute().
+            allow_delegated_execution=True,
         )
 
     def resolve_input(self, ctx: foo.ExecutionContext) -> types.Property:
@@ -317,10 +339,20 @@ class VLMRunChatCompletions(foo.Operator):
         for model_id, model_desc in ORION_MODELS:
             model_choices.add_choice(model_id, label=model_desc)
 
+        # Honor a VLMRUN_DEFAULT_MODEL override; if it names a model not in the
+        # built-in list (e.g. a pinned backend variant), expose it as a choice
+        # so the dropdown default stays valid.
+        default_model = _default_model()
+        if default_model not in model_choices.values():
+            model_choices.add_choice(
+                default_model,
+                label=f"{default_model} (from VLMRUN_DEFAULT_MODEL)",
+            )
+
         inputs.enum(
             "model",
             model_choices.values(),
-            default=DEFAULT_MODEL,
+            default=default_model,
             label="Model",
             description="Select the Orion model variant to use",
             view=model_choices,
@@ -584,7 +616,7 @@ class VLMRunChatCompletions(foo.Operator):
         then converts to native FiftyOne label types.
         """
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model", _default_model())
         prompt = ctx.params["prompt"]
         output_type = ctx.params.get("output_type", "detections")
         result_field = ctx.params.get("result_field", "vlmrun_annotations")
@@ -894,7 +926,7 @@ class VLMRunChatCompletions(foo.Operator):
         import re
         import shutil
 
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model", _default_model())
         prompt = ctx.params["prompt"]
         temperature = ctx.params.get("temperature", 0.7)
         system_prompt = ctx.params.get("system_prompt")
@@ -1107,7 +1139,7 @@ class VLMRunChatCompletions(foo.Operator):
         import shutil
 
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model", _default_model())
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "edited_image")
         temperature = ctx.params.get("temperature", 0.0)
@@ -1325,7 +1357,7 @@ class VLMRunChatCompletions(foo.Operator):
     def _execute_analyze(self, ctx: foo.ExecutionContext, api_key: str) -> Dict[str, Any]:
         """Execute media analysis mode."""
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model", _default_model())
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "chat_response")
         temperature = ctx.params.get("temperature", 0.0)

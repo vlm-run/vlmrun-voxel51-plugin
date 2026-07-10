@@ -139,6 +139,50 @@ class TestChatCompletionsOperator:
         assert hasattr(operator, '_process_chat_result')
 
 
+class TestOrionModelConfig:
+    """Offline tests pinning the Orion model configuration.
+
+    These guard the Orion 2 upgrade so CI fails if the default or the
+    available-model list regress (the integration tests are skipped without
+    an API key, so without these the constants are effectively untested).
+    """
+
+    def test_default_model_is_orion_2_auto(self):
+        from chat_completions import DEFAULT_MODEL
+
+        assert DEFAULT_MODEL == "vlmrun-orion-2:auto"
+
+    def test_orion_2_variants_present_and_first(self):
+        from chat_completions import ORION_MODELS
+
+        model_ids = [model_id for model_id, _ in ORION_MODELS]
+
+        # All three Orion 2 variants are offered...
+        for variant in ("fast", "auto", "pro"):
+            assert f"vlmrun-orion-2:{variant}" in model_ids
+
+        # ...and listed before any Orion 1 variant (Orion 2 is the default family).
+        first_orion_1 = next(
+            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-1:")
+        )
+        last_orion_2 = max(
+            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-2:")
+        )
+        assert last_orion_2 < first_orion_1
+
+    def test_orion_1_retained_for_backward_compat(self):
+        from chat_completions import ORION_MODELS
+
+        model_ids = [model_id for model_id, _ in ORION_MODELS]
+        for variant in ("fast", "auto", "pro"):
+            assert f"vlmrun-orion-1:{variant}" in model_ids
+
+    def test_default_model_is_selectable(self):
+        from chat_completions import DEFAULT_MODEL, ORION_MODELS
+
+        assert DEFAULT_MODEL in [model_id for model_id, _ in ORION_MODELS]
+
+
 class TestOperatorRegistry:
     """Test that all operators are properly registered."""
 
@@ -196,8 +240,12 @@ class TestChatCompletionsIntegration:
         )
 
     @requires_api_key
-    def test_image_description(self, client):
-        """Test basic image description capability.
+    @pytest.mark.parametrize("model", ["vlmrun-orion-2:fast", "vlmrun-orion-1:fast"])
+    def test_image_description(self, client, model):
+        """Test basic image description capability across Orion families.
+
+        Runs against both Orion 2 (default) and Orion 1 (still selectable),
+        so the backward-compatible path keeps live coverage.
 
         Cookbook reference: 12_orion_image_understanding.ipynb
         Use case: Generate natural language descriptions of images.
@@ -209,7 +257,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=image_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model=model,
             messages=[{
                 "role": "user",
                 "content": [
@@ -236,7 +284,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=image_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model="vlmrun-orion-2:fast",
             messages=[
                 {"role": "system", "content": "You are a JSON API. Always respond with valid JSON only, no text."},
                 {
@@ -270,7 +318,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=video_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model="vlmrun-orion-2:fast",
             messages=[{
                 "role": "user",
                 "content": [
@@ -297,7 +345,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=video_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model="vlmrun-orion-2:fast",
             messages=[{
                 "role": "user",
                 "content": [
@@ -327,7 +375,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=image_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model="vlmrun-orion-2:fast",
             messages=[
                 {"role": "system", "content": "You are a veterinarian. Respond professionally."},
                 {
@@ -356,7 +404,7 @@ class TestChatCompletionsIntegration:
         uploaded = client.files.upload(file=image_path)
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:fast",
+            model="vlmrun-orion-2:fast",
             messages=[{
                 "role": "user",
                 "content": [
@@ -392,7 +440,7 @@ class TestChatCompletionsIntegration:
             frame_id: ImageRef = Field(..., description="The ID of the extracted frame")
 
         response = client.agent.completions.create(
-            model="vlmrun-orion-1:auto",
+            model="vlmrun-orion-2:auto",
             messages=[{
                 "role": "user",
                 "content": [
