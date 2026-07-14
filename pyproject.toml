@@ -7,7 +7,7 @@ name = "vlmrun-fiftyone-plugin"
 version = "1.0.0"
 description = "FiftyOne plugin for VLM Run's vision-language model"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "VLM Run Team", email = "support@vlm.run"},
