@@ -157,16 +157,30 @@ class TestOrionModelConfig:
 
         model_ids = [model_id for model_id, _ in ORION_MODELS]
 
-        # All three Orion 2 variants are offered...
-        for variant in ("fast", "auto", "pro"):
+        # Orion 2 tier aliases and bare alias are offered...
+        for variant in ("lite", "fast", "auto", "pro"):
             assert f"vlmrun-orion-2:{variant}" in model_ids
+        assert "vlmrun-orion-2" in model_ids
+
+        # Named Orion 2 backends from the chat-completions API enum.
+        for backend in (
+            "qwen3.6-35b-a3b",
+            "gemma4-26b-a4b",
+            "kimi-2.6",
+            "gpt-5.5",
+            "opus-4.8",
+            "muse-spark-1.1",
+            "grok-4.5",
+            "gemini-flash-3.5",
+        ):
+            assert f"vlmrun-orion-2:{backend}" in model_ids
 
         # ...and listed before any Orion 1 variant (Orion 2 is the default family).
         first_orion_1 = next(
-            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-1:")
+            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-1")
         )
         last_orion_2 = max(
-            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-2:")
+            i for i, m in enumerate(model_ids) if m.startswith("vlmrun-orion-2")
         )
         assert last_orion_2 < first_orion_1
 
@@ -174,13 +188,26 @@ class TestOrionModelConfig:
         from chat_completions import ORION_MODELS
 
         model_ids = [model_id for model_id, _ in ORION_MODELS]
-        for variant in ("fast", "auto", "pro"):
+        for variant in ("lite", "fast", "auto", "pro"):
             assert f"vlmrun-orion-1:{variant}" in model_ids
+        assert "vlmrun-orion-1" in model_ids
 
     def test_default_model_is_selectable(self):
         from chat_completions import DEFAULT_MODEL, ORION_MODELS
 
         assert DEFAULT_MODEL in [model_id for model_id, _ in ORION_MODELS]
+
+    def test_default_model_env_override_strips_whitespace(self, monkeypatch):
+        from chat_completions import DEFAULT_MODEL, _default_model
+
+        monkeypatch.delenv("VLMRUN_DEFAULT_MODEL", raising=False)
+        assert _default_model() == DEFAULT_MODEL
+
+        monkeypatch.setenv("VLMRUN_DEFAULT_MODEL", "  vlmrun-orion-1:pro  ")
+        assert _default_model() == "vlmrun-orion-1:pro"
+
+        monkeypatch.setenv("VLMRUN_DEFAULT_MODEL", "   ")
+        assert _default_model() == DEFAULT_MODEL
 
 
 class TestOperatorRegistry:

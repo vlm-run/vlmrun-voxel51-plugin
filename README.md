@@ -54,6 +54,10 @@ session = fo.launch_app(dataset)
 
 ### vlmrun_chat_completions
 
+![Chat Completions - Analyze & Redact](gifs/vlmrun_fiftyone_chat_redact.gif)
+
+![Chat Completions - Video Edit](gifs/vlmrun_fiftyone_video_edit.gif)
+
 Flexible media analysis and content generation using VLM Run's Orion chat
 completions API with natural language prompts. Defaults to the Orion 2 model
 family (code-execution agents); Orion 1 remains selectable.

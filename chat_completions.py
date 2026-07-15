@@ -49,15 +49,33 @@ DEFAULT_MODEL = "vlmrun-orion-2:auto"
 
 # Available Orion models. Orion 2 (code-execution agents) is listed first and
 # is the default; Orion 1 (tool-calling agents) is retained for backward
-# compatibility. Both share the same OpenAI-compatible chat-completions
-# response contract, so selecting either works with the same code paths.
+# compatibility. Includes the chat-completions model enum from
+# https://docs.vlm.run/api-reference/v1/post-chat-completions — tier aliases
+# (lite/fast/auto/pro) and named Orion 2 backends. Both families share the same
+# OpenAI-compatible response contract, so selecting any works with the same
+# code paths. Override via VLMRUN_DEFAULT_MODEL for models not listed here.
 ORION_MODELS = [
+    # Orion 2 — tier aliases
+    ("vlmrun-orion-2:lite", "Orion 2 Lite - Lightest / cheapest Orion 2 tier"),
     ("vlmrun-orion-2:fast", "Orion 2 Fast - Optimized for simple tasks with speed"),
     ("vlmrun-orion-2:auto", "Orion 2 Auto - Automatically selects best model for task"),
     ("vlmrun-orion-2:pro", "Orion 2 Pro - Most capable for complex workflows"),
+    ("vlmrun-orion-2", "Orion 2 - Alias for the default Orion 2 agent"),
+    # Orion 2 — named backend variants
+    ("vlmrun-orion-2:qwen3.6-35b-a3b", "Orion 2 — Qwen 3.6 35B-A3B"),
+    ("vlmrun-orion-2:gemma4-26b-a4b", "Orion 2 — Gemma 4 26B-A4B"),
+    ("vlmrun-orion-2:kimi-2.6", "Orion 2 — Kimi 2.6"),
+    ("vlmrun-orion-2:gpt-5.5", "Orion 2 — GPT 5.5"),
+    ("vlmrun-orion-2:opus-4.8", "Orion 2 — Claude Opus 4.8"),
+    ("vlmrun-orion-2:muse-spark-1.1", "Orion 2 — Muse Spark 1.1"),
+    ("vlmrun-orion-2:grok-4.5", "Orion 2 — Grok 4.5"),
+    ("vlmrun-orion-2:gemini-flash-3.5", "Orion 2 — Gemini Flash 3.5"),
+    # Orion 1 — backward compatibility
+    ("vlmrun-orion-1:lite", "Orion 1 Lite - Lightest / cheapest Orion 1 tier"),
     ("vlmrun-orion-1:fast", "Orion 1 Fast - Optimized for simple tasks with speed"),
     ("vlmrun-orion-1:auto", "Orion 1 Auto - Automatically selects best model for task"),
     ("vlmrun-orion-1:pro", "Orion 1 Pro - Most capable for complex workflows"),
+    ("vlmrun-orion-1", "Orion 1 - Alias for the default Orion 1 agent"),
 ]
 
 
@@ -69,7 +87,8 @@ def _default_model() -> str:
     and opt out of the Orion 2 default — without editing code. Falls back to
     ``DEFAULT_MODEL``.
     """
-    return os.getenv("VLMRUN_DEFAULT_MODEL") or DEFAULT_MODEL
+    val = (os.getenv("VLMRUN_DEFAULT_MODEL") or "").strip()
+    return val or DEFAULT_MODEL
 
 
 # Long-running-request handling. Orion runs on Modal, whose HTTP gateway closes
@@ -716,7 +735,7 @@ class VLMRunChatCompletions(foo.Operator):
         then converts to native FiftyOne label types.
         """
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", _default_model())
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         output_type = ctx.params.get("output_type", "detections")
         result_field = ctx.params.get("result_field", "vlmrun_annotations")
@@ -1026,7 +1045,7 @@ class VLMRunChatCompletions(foo.Operator):
         import re
         import shutil
 
-        model = ctx.params.get("model", _default_model())
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         temperature = ctx.params.get("temperature", 0.7)
         system_prompt = ctx.params.get("system_prompt")
@@ -1232,7 +1251,7 @@ class VLMRunChatCompletions(foo.Operator):
         import shutil
 
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", _default_model())
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "edited_image")
         temperature = ctx.params.get("temperature", 0.0)
@@ -1263,9 +1282,10 @@ class VLMRunChatCompletions(foo.Operator):
         )
 
         # Determine output artifact types based on toolsets
-        output_artifact_types = ["image"]
+        # Use plural types to allow multiple artifacts in the response
+        output_artifact_types = ["images"]
         if "video" in toolsets:
-            output_artifact_types = ["video"]
+            output_artifact_types = ["videos"]
 
         # Get samples
         if ctx.selected:
@@ -1418,21 +1438,32 @@ class VLMRunChatCompletions(foo.Operator):
                                 )
                                 pb.update()
                                 continue
+
+                        output_paths = [str(output_path)]
+                        if ctx.dataset:
+                            new_sample = fo.Sample(filepath=str(output_path))
+                            new_sample.tags.append("vlmrun_edited")
+                            new_sample["prompt"] = prompt
+                            new_sample["source_filepath"] = sample.filepath
+                            new_sample["generated_by"] = "vlmrun_chat_completions"
+                            new_sample["model"] = model
+                            ctx.dataset.add_sample(new_sample)
                     else:
                         session_id = getattr(response, "session_id", None)
                         if not session_id and hasattr(response, "model_extra"):
                             session_id = response.model_extra.get("session_id")
 
-                        # Parse artifact IDs from content
+                        # Parse artifact IDs from content (plural types may return a list)
                         artifact_ids = _parse_artifact_ids(content, output_artifact_types)
-                        object_id = artifact_ids.get(output_artifact_types[0])
+                        object_ids = artifact_ids.get(output_artifact_types[0])
 
-                        if not object_id:
+                        if not object_ids:
+                            # Fallback: search for artifact refs via regex
                             refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
                             if refs:
-                                object_id = refs[0]
+                                object_ids = refs
 
-                        if not object_id:
+                        if not object_ids:
                             errors.append(
                                 f"No edited artifact produced for {Path(sample.filepath).name}. "
                                 f"Response: {content[:200]}"
@@ -1440,56 +1471,84 @@ class VLMRunChatCompletions(foo.Operator):
                             pb.update()
                             continue
 
-                        # Download the artifact
-                        artifact = self._get_artifact_with_retry(
-                            client=client,
-                            session_id=session_id,
-                            artifact_ref=object_id,
-                        )
+                        # Normalize to list
+                        if isinstance(object_ids, str):
+                            object_ids = [object_ids]
 
-                        artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
-                        ext_map = {"img": ".png", "vid": ".mp4", "aud": ".mp3", "doc": ".pdf"}
-                        ext = ext_map.get(artifact_type, ".png")
-                        output_path = output_dir / f"{source_name}_{object_id}{ext}"
+                        ext_map = {
+                            "img": ".png",
+                            "vid": ".mp4",
+                            "aud": ".mp3",
+                            "doc": ".pdf",
+                            "spz": ".spz",
+                            "recon": ".spz",
+                        }
+                        output_paths = []
 
-                        if isinstance(artifact, str):
-                            if Path(artifact).exists():
-                                shutil.copy2(artifact, output_path)
-                            elif artifact.startswith(("http://", "https://")):
+                        for object_id in object_ids:
+                            # Download the artifact
+                            artifact = self._get_artifact_with_retry(
+                                client=client,
+                                session_id=session_id,
+                                artifact_ref=object_id,
+                            )
+
+                            # Save to disk - determine extension from artifact type
+                            artifact_type = (
+                                object_id.split("_")[0] if "_" in object_id else "img"
+                            )
+                            ext = ext_map.get(artifact_type, ".png")
+                            output_path = output_dir / f"{source_name}_{object_id}{ext}"
+
+                            if isinstance(artifact, str):
+                                if Path(artifact).exists():
+                                    shutil.copy2(artifact, output_path)
+                                elif artifact.startswith(("http://", "https://")):
+                                    import urllib.request
+                                    urllib.request.urlretrieve(
+                                        str(artifact), str(output_path)
+                                    )
+                                else:
+                                    errors.append(
+                                        f"Unknown string artifact: {artifact[:100]}"
+                                    )
+                                    continue
+                            elif isinstance(artifact, Path) and artifact.exists():
+                                shutil.copy2(str(artifact), output_path)
+                            elif hasattr(artifact, "save"):
+                                artifact.save(str(output_path))
+                            elif isinstance(artifact, bytes):
+                                with open(output_path, "wb") as f:
+                                    f.write(artifact)
+                            elif hasattr(artifact, "__str__") and str(artifact).startswith(
+                                ("http://", "https://")
+                            ):
                                 import urllib.request
-                                urllib.request.urlretrieve(str(artifact), str(output_path))
+                                urllib.request.urlretrieve(
+                                    str(artifact), str(output_path)
+                                )
                             else:
-                                errors.append(f"Unknown string artifact: {artifact[:100]}")
-                                pb.update()
+                                errors.append(f"Unknown artifact type: {type(artifact)}")
                                 continue
-                        elif isinstance(artifact, Path) and artifact.exists():
-                            shutil.copy2(str(artifact), output_path)
-                        elif hasattr(artifact, "save"):
-                            artifact.save(str(output_path))
-                        elif isinstance(artifact, bytes):
-                            with open(output_path, "wb") as f:
-                                f.write(artifact)
-                        elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
-                            import urllib.request
-                            urllib.request.urlretrieve(str(artifact), str(output_path))
-                        else:
-                            errors.append(f"Unknown artifact type: {type(artifact)}")
-                            pb.update()
-                            continue
 
-                    # Store filepath on the sample
-                    sample[result_field] = str(output_path)
-                    sample.save()
+                            output_paths.append(str(output_path))
 
-                    # Add edited image as a viewable sample
-                    if ctx.dataset:
-                        new_sample = fo.Sample(filepath=str(output_path))
-                        new_sample.tags.append("vlmrun_edited")
-                        new_sample["prompt"] = prompt
-                        new_sample["source_filepath"] = sample.filepath
-                        new_sample["generated_by"] = "vlmrun_chat_completions"
-                        new_sample["model"] = model
-                        ctx.dataset.add_sample(new_sample)
+                            # Add edited artifact as a viewable sample
+                            if ctx.dataset:
+                                new_sample = fo.Sample(filepath=str(output_path))
+                                new_sample.tags.append("vlmrun_edited")
+                                new_sample["prompt"] = prompt
+                                new_sample["source_filepath"] = sample.filepath
+                                new_sample["generated_by"] = "vlmrun_chat_completions"
+                                new_sample["model"] = model
+                                ctx.dataset.add_sample(new_sample)
+
+                    # Store output path(s) on the original sample
+                    if output_paths:
+                        sample[result_field] = (
+                            output_paths if len(output_paths) > 1 else output_paths[0]
+                        )
+                        sample.save()
 
                     processed += 1
 
@@ -1518,7 +1577,7 @@ class VLMRunChatCompletions(foo.Operator):
     def _execute_analyze(self, ctx: foo.ExecutionContext, api_key: str) -> Dict[str, Any]:
         """Execute media analysis mode."""
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", _default_model())
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "chat_response")
         temperature = ctx.params.get("temperature", 0.0)

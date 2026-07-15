@@ -23,11 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Orion 1 variants (`vlmrun-orion-1:fast|auto|pro`) remain selectable in the
-  Chat Completions model dropdown for backward compatibility.
+- Expanded the Chat Completions model dropdown to match the chat-completions
+  API enum: Orion 2 tier aliases (`lite|fast|auto|pro`), named Orion 2
+  backends (Qwen, Gemma, Kimi, GPT, Opus, Muse Spark, Grok, Gemini Flash),
+  and Orion 1 (`lite|fast|auto|pro`) for backward compatibility.
 - `VLMRUN_DEFAULT_MODEL` environment variable to override the default model
   (e.g. pin an Orion 1 variant or a pinned backend variant), providing an
-  opt-out from the Orion 2 default without editing code.
+  opt-out from the Orion 2 default without editing code. Leading/trailing
+  whitespace is stripped.
 - Enabled **delegated (background) execution** for the Chat Completions
   operator (`allow_delegated_execution=True`). Long-running Orion operations —
   video edit/generation and document redaction — can exceed the synchronous
