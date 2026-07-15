@@ -45,14 +45,142 @@ TOOLSET_DESCRIPTIONS = {
 }
 
 # Default model
-DEFAULT_MODEL = "vlmrun-orion-1:auto"
+DEFAULT_MODEL = "vlmrun-orion-2:auto"
 
-# Available Orion models
+# Available Orion models. Orion 2 (code-execution agents) is listed first and
+# is the default; Orion 1 (tool-calling agents) is retained for backward
+# compatibility. Includes the chat-completions model enum from
+# https://docs.vlm.run/api-reference/v1/post-chat-completions — tier aliases
+# (lite/fast/auto/pro) and named Orion 2 backends. Both families share the same
+# OpenAI-compatible response contract, so selecting any works with the same
+# code paths. Override via VLMRUN_DEFAULT_MODEL for models not listed here.
 ORION_MODELS = [
-    ("vlmrun-orion-1:fast", "Fast - Optimized for simple tasks with speed"),
-    ("vlmrun-orion-1:auto", "Auto - Automatically selects best model for task"),
-    ("vlmrun-orion-1:pro", "Pro - Most capable for complex multi-step workflows"),
+    # Orion 2 — tier aliases
+    ("vlmrun-orion-2:lite", "Orion 2 Lite - Lightest / cheapest Orion 2 tier"),
+    ("vlmrun-orion-2:fast", "Orion 2 Fast - Optimized for simple tasks with speed"),
+    ("vlmrun-orion-2:auto", "Orion 2 Auto - Automatically selects best model for task"),
+    ("vlmrun-orion-2:pro", "Orion 2 Pro - Most capable for complex workflows"),
+    ("vlmrun-orion-2", "Orion 2 - Alias for the default Orion 2 agent"),
+    # Orion 2 — named backend variants
+    ("vlmrun-orion-2:qwen3.6-35b-a3b", "Orion 2 — Qwen 3.6 35B-A3B"),
+    ("vlmrun-orion-2:gemma4-26b-a4b", "Orion 2 — Gemma 4 26B-A4B"),
+    ("vlmrun-orion-2:kimi-2.6", "Orion 2 — Kimi 2.6"),
+    ("vlmrun-orion-2:gpt-5.5", "Orion 2 — GPT 5.5"),
+    ("vlmrun-orion-2:opus-4.8", "Orion 2 — Claude Opus 4.8"),
+    ("vlmrun-orion-2:muse-spark-1.1", "Orion 2 — Muse Spark 1.1"),
+    ("vlmrun-orion-2:grok-4.5", "Orion 2 — Grok 4.5"),
+    ("vlmrun-orion-2:gemini-flash-3.5", "Orion 2 — Gemini Flash 3.5"),
+    # Orion 1 — backward compatibility
+    ("vlmrun-orion-1:lite", "Orion 1 Lite - Lightest / cheapest Orion 1 tier"),
+    ("vlmrun-orion-1:fast", "Orion 1 Fast - Optimized for simple tasks with speed"),
+    ("vlmrun-orion-1:auto", "Orion 1 Auto - Automatically selects best model for task"),
+    ("vlmrun-orion-1:pro", "Orion 1 Pro - Most capable for complex workflows"),
+    ("vlmrun-orion-1", "Orion 1 - Alias for the default Orion 1 agent"),
 ]
+
+
+def _default_model() -> str:
+    """Return the effective default model.
+
+    Overridable via the ``VLMRUN_DEFAULT_MODEL`` environment variable so users
+    can pin a model (e.g. an Orion 1 variant, or a pinned backend variant) —
+    and opt out of the Orion 2 default — without editing code. Falls back to
+    ``DEFAULT_MODEL``.
+    """
+    val = (os.getenv("VLMRUN_DEFAULT_MODEL") or "").strip()
+    return val or DEFAULT_MODEL
+
+
+# Long-running-request handling. Orion runs on Modal, whose HTTP gateway closes
+# the connection after ~150s; a request that outlives that window returns
+# 303 See Other with a Location URL that serves the result once the job finishes.
+# The OpenAI client raises APIStatusError on the 303, so without this the plugin
+# would record every slow Orion op (video/document generation, large images) as a
+# failure even though it completed — and billed — server-side. Overridable via
+# VLMRUN_MAX_WAIT / VLMRUN_POLL_INTERVAL.
+DEFAULT_MAX_WAIT = 600.0
+DEFAULT_POLL_INTERVAL = 3.0
+
+
+def _poll_redirect(
+    client: Any, location: str, max_wait: float, poll_interval: float
+) -> Dict[str, Any]:
+    """Poll a 303 redirect target until the Orion completion result is ready.
+
+    The result URL long-polls (holds the connection for minutes) and, while the
+    job runs, may answer 202/204/303 or an intermittent 5xx; a read timeout on
+    the poll simply means "not done yet." Returns the parsed completion body.
+    """
+    import time
+    from urllib.parse import urljoin
+
+    import requests
+
+    url = urljoin("https://agent.vlm.run", location)
+    headers = {"Authorization": f"Bearer {client.api_key}"}
+    deadline = time.monotonic() + max_wait
+    consecutive_5xx = 0
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, timeout=120, allow_redirects=False)
+        except (requests.Timeout, requests.ConnectionError):
+            # long-poll held the connection past the read timeout — not done yet
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Orion long-running request did not complete within {max_wait}s"
+                )
+            continue
+        if resp.status_code in (200, 201) and resp.content:  # completion body is ready
+            return resp.json()
+        if resp.status_code in (202, 204, 303) or resp.status_code >= 500:
+            # 202/204/303: result not ready yet (204 = No Content is returned
+            # repeatedly while the job runs). 5xx: the poll endpoint intermittently
+            # errors mid-job; tolerate a bounded number in a row.
+            if resp.status_code >= 500:
+                consecutive_5xx += 1
+                if consecutive_5xx > 5:
+                    raise RuntimeError(
+                        f"Polling Orion request failed with status {resp.status_code}: {resp.text[:300]}"
+                    )
+            else:
+                consecutive_5xx = 0
+                if resp.status_code == 303:
+                    url = urljoin(url, resp.headers.get("location", url))
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Orion long-running request did not complete within {max_wait}s"
+                )
+            time.sleep(poll_interval)
+            continue
+        raise RuntimeError(
+            f"Polling Orion request failed with status {resp.status_code}: {resp.text[:300]}"
+        )
+
+
+def _create_completion(client: Any, **kwargs: Any) -> Any:
+    """Call ``client.agent.completions.create`` with transparent 303 handling.
+
+    Orion returns 303 for any request that outlives the ~150s Modal window; the
+    OpenAI client surfaces that as ``APIStatusError``. We catch it, poll the
+    Location URL, and rebuild a typed ``ChatCompletion`` so callers keep using
+    ``response.choices[...]`` and the ``session_id`` extra field unchanged.
+    """
+    import openai
+
+    try:
+        return client.agent.completions.create(**kwargs)
+    except openai.APIStatusError as exc:
+        location = exc.response.headers.get("location")
+        if exc.response.status_code != 303 or not location:
+            raise
+        max_wait = float(os.getenv("VLMRUN_MAX_WAIT", str(DEFAULT_MAX_WAIT)))
+        poll_interval = float(os.getenv("VLMRUN_POLL_INTERVAL", str(DEFAULT_POLL_INTERVAL)))
+        result = _poll_redirect(client, location, max_wait, poll_interval)
+
+        from openai.types.chat import ChatCompletion
+
+        return ChatCompletion.model_validate(result)
+
 
 # Supported file extensions (per VLM Run docs)
 IMAGE_EXTENSIONS = (
@@ -77,6 +205,19 @@ AUDIO_EXTENSIONS = (
 # Note: Audio is NOT supported in chat completions
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS + VIDEO_EXTENSIONS + DOCUMENT_EXTENSIONS
 
+# Video edit/tools (trim, sample, extract segments) return a URL to the edited
+# video via structured output — NOT a downloadable artifact ref. See VLM Run
+# docs: https://docs.vlm.run/agents/capabilities/video/tools
+_VIDEO_EDIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string", "description": "URL of the edited/trimmed video"},
+        "start_time": {"type": "string", "description": "Start time (HH:MM:SS.MS), if applicable"},
+        "end_time": {"type": "string", "description": "End time (HH:MM:SS.MS), if applicable"},
+    },
+    "required": ["url"],
+}
+
 # --- Vendored artifact schema helpers (from fiftyone.utils.vlmrun) ---
 # These are vendored here to avoid depending on an unreleased fiftyone util
 # and to add UrlRef/ArrayRef support.
@@ -86,7 +227,6 @@ _SINGULAR_ARTIFACT_TYPES = {
     "video": "VideoRef",
     "audio": "AudioRef",
     "document": "DocumentRef",
-    "recon": "ReconRef",
     "url": "UrlRef",
     "array": "ArrayRef",
 }
@@ -96,7 +236,6 @@ _PLURAL_ARTIFACT_TYPES = {
     "videos": ("VideoRef", "List of videos"),
     "audios": ("AudioRef", "List of audio files"),
     "documents": ("DocumentRef", "List of documents"),
-    "recons": ("ReconRef", "List of 3D reconstructions"),
     "urls": ("UrlRef", "List of URLs"),
     "arrays": ("ArrayRef", "List of arrays"),
 }
@@ -117,7 +256,6 @@ def _build_artifact_schema(output_artifacts):
         AudioRef,
         DocumentRef,
         ImageRef,
-        ReconRef,
         UrlRef,
         VideoRef,
     )
@@ -127,7 +265,6 @@ def _build_artifact_schema(output_artifacts):
         "VideoRef": VideoRef,
         "AudioRef": AudioRef,
         "DocumentRef": DocumentRef,
-        "ReconRef": ReconRef,
         "UrlRef": UrlRef,
         "ArrayRef": ArrayRef,
     }
@@ -224,7 +361,11 @@ class VLMRunChatCompletions(foo.Operator):
             label="VLM Run: Chat Completions (Orion)",
             dynamic=True,
             allow_immediate_execution=True,
-            allow_delegated_execution=False,
+            # Long Orion operations (video edit/generation, document redaction)
+            # can exceed the synchronous execution limit; allow users to run
+            # them as delegated (background) jobs. The operator already handles
+            # ctx.delegated throughout execute().
+            allow_delegated_execution=True,
         )
 
     def resolve_input(self, ctx: foo.ExecutionContext) -> types.Property:
@@ -317,10 +458,20 @@ class VLMRunChatCompletions(foo.Operator):
         for model_id, model_desc in ORION_MODELS:
             model_choices.add_choice(model_id, label=model_desc)
 
+        # Honor a VLMRUN_DEFAULT_MODEL override; if it names a model not in the
+        # built-in list (e.g. a pinned backend variant), expose it as a choice
+        # so the dropdown default stays valid.
+        default_model = _default_model()
+        if default_model not in model_choices.values():
+            model_choices.add_choice(
+                default_model,
+                label=f"{default_model} (from VLMRUN_DEFAULT_MODEL)",
+            )
+
         inputs.enum(
             "model",
             model_choices.values(),
-            default=DEFAULT_MODEL,
+            default=default_model,
             label="Model",
             description="Select the Orion model variant to use",
             view=model_choices,
@@ -434,7 +585,7 @@ class VLMRunChatCompletions(foo.Operator):
             default_system = "You are a content generation assistant. Always return an asset."
         elif mode == "edit":
             default_system = (
-                "You are a video editing assistant. Always return the edited video as an artifact."
+                "You are a video editing assistant. Return the edited video as a URL."
                 if media_type == "video"
                 else "You are an image editing assistant. Always return the edited image as an artifact."
             )
@@ -584,7 +735,7 @@ class VLMRunChatCompletions(foo.Operator):
         then converts to native FiftyOne label types.
         """
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         output_type = ctx.params.get("output_type", "detections")
         result_field = ctx.params.get("result_field", "vlmrun_annotations")
@@ -673,7 +824,7 @@ class VLMRunChatCompletions(foo.Operator):
                     else:
                         request_kwargs["response_format"] = {"type": "json_object"}
 
-                    response = client.agent.completions.create(**request_kwargs)
+                    response = _create_completion(client, **request_kwargs)
 
                     content = response.choices[0].message.content or ""
 
@@ -894,7 +1045,7 @@ class VLMRunChatCompletions(foo.Operator):
         import re
         import shutil
 
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         temperature = ctx.params.get("temperature", 0.7)
         system_prompt = ctx.params.get("system_prompt")
@@ -965,7 +1116,8 @@ class VLMRunChatCompletions(foo.Operator):
                     messages.append({"role": "user", "content": prompt})
 
                 # Make the API call
-                response = client.agent.completions.create(
+                response = _create_completion(
+                    client,
                     model=model,
                     messages=messages,
                     temperature=temperature,
@@ -980,8 +1132,8 @@ class VLMRunChatCompletions(foo.Operator):
                     errors.append(f"Generation {i+1}: No session ID in response")
                     continue
 
-                # Find all artifact references (including url_, spz_, and recon_ types)
-                artifact_refs = re.findall(r'(?:img|vid|aud|doc|url|spz|recon)_[a-zA-Z0-9]{6}', content)
+                # Find all artifact references (including url_ types)
+                artifact_refs = re.findall(r'(?:img|vid|aud|doc|url)_[a-zA-Z0-9]{6}', content)
 
                 if not artifact_refs:
                     errors.append(f"Generation {i+1}: No artifacts in response. Response: {content[:200]}")
@@ -993,8 +1145,6 @@ class VLMRunChatCompletions(foo.Operator):
                     "vid": ".mp4",
                     "aud": ".mp3",
                     "doc": ".pdf",
-                    "spz": ".spz",
-                    "recon": ".spz",  # 3D reconstruction returns SPZ format
                 }
 
                 # Download and save each artifact
@@ -1046,12 +1196,6 @@ class VLMRunChatCompletions(foo.Operator):
                         else:
                             errors.append(f"Unknown artifact type: {type(artifact)}")
                             continue
-
-                        # Convert SPZ to PLY for FiftyOne 3D support
-                        if artifact_type in ("spz", "recon") and str(output_path).endswith(".spz"):
-                            ply_path = self._convert_spz_to_ply(output_path, errors)
-                            if ply_path:
-                                output_path = ply_path
 
                         # Add as new sample to dataset
                         if ctx.dataset:
@@ -1107,7 +1251,7 @@ class VLMRunChatCompletions(foo.Operator):
         import shutil
 
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "edited_image")
         temperature = ctx.params.get("temperature", 0.0)
@@ -1201,8 +1345,11 @@ class VLMRunChatCompletions(foo.Operator):
                         ],
                     })
 
-                    # Build request with toolsets and artifact schema
-                    artifact_schema = _build_artifact_schema(output_artifact_types)
+                    # Video tools (trim/sample/segment) return a URL to the edited
+                    # video via structured output; image edits return an artifact
+                    # ref that must be downloaded via artifacts.get.
+                    is_video = file_path.suffix.lower() in VIDEO_EXTENSIONS
+
                     request_kwargs: Dict[str, Any] = {
                         "model": model,
                         "messages": messages,
@@ -1210,89 +1357,89 @@ class VLMRunChatCompletions(foo.Operator):
                         "extra_body": self._build_extra_body(ctx, toolsets),
                     }
 
-                    if artifact_schema:
+                    if is_video:
                         request_kwargs["response_format"] = {
                             "type": "json_schema",
-                            "schema": artifact_schema,
+                            "schema": _VIDEO_EDIT_SCHEMA,
                         }
+                    else:
+                        artifact_schema = _build_artifact_schema(output_artifact_types)
+                        if artifact_schema:
+                            request_kwargs["response_format"] = {
+                                "type": "json_schema",
+                                "schema": artifact_schema,
+                            }
 
                     # Make the API call
-                    response = client.agent.completions.create(**request_kwargs)
-
-                    # Extract content and session_id
+                    response = _create_completion(client, **request_kwargs)
                     content = response.choices[0].message.content or ""
-                    session_id = getattr(response, "session_id", None)
-
-                    if not session_id:
-                        # Try model_extra fallback
-                        if hasattr(response, "model_extra"):
-                            session_id = response.model_extra.get("session_id")
-
-                    # Parse artifact IDs from content
-                    artifact_ids = _parse_artifact_ids(content, output_artifact_types)
-                    object_ids = artifact_ids.get(output_artifact_types[0])
-
-                    if not object_ids:
-                        # Fallback: search for artifact refs via regex
-                        refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
-                        if refs:
-                            object_ids = refs
-
-                    if not object_ids:
-                        errors.append(
-                            f"No edited artifact produced for {Path(sample.filepath).name}. "
-                            f"Response: {content[:200]}"
-                        )
-                        pb.update()
-                        continue
-
-                    # Normalize to list
-                    if isinstance(object_ids, str):
-                        object_ids = [object_ids]
-
-                    ext_map = {"img": ".png", "vid": ".mp4", "aud": ".mp3", "doc": ".pdf", "spz": ".spz", "recon": ".spz"}
                     source_name = Path(sample.filepath).stem
-                    output_paths = []
 
-                    for object_id in object_ids:
-                        # Download the artifact
-                        artifact = self._get_artifact_with_retry(
-                            client=client,
-                            session_id=session_id,
-                            artifact_ref=object_id,
-                        )
+                    if is_video:
+                        # Video tools return a JSON pointer to the edited video in
+                        # one of two forms — a direct URL, or an artifact id (e.g.
+                        # vid_abc123, sometimes suffixed .mp4). The API picks which;
+                        # handle both and download the bytes to a local file.
+                        import urllib.request
 
-                        # Save to disk - determine extension from artifact type
-                        artifact_type = object_id.split("_")[0] if "_" in object_id else "img"
-                        ext = ext_map.get(artifact_type, ".png")
-                        output_path = output_dir / f"{source_name}_{object_id}{ext}"
+                        pointer = None
+                        try:
+                            data = json.loads(content)
+                            if isinstance(data, dict):
+                                pointer = data.get("url") or data.get("video_url")
+                        except (json.JSONDecodeError, TypeError):
+                            pointer = None
+                        if not pointer:
+                            match = re.search(
+                                r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', content
+                            )
+                            pointer = match.group(0) if match else None
+                        if not pointer:
+                            match = re.search(r'(?:vid|img)_[a-zA-Z0-9]{6}', content)
+                            pointer = match.group(0) if match else None
 
-                        if isinstance(artifact, str):
-                            if Path(artifact).exists():
-                                shutil.copy2(artifact, output_path)
-                            elif artifact.startswith(("http://", "https://")):
-                                import urllib.request
-                                urllib.request.urlretrieve(str(artifact), str(output_path))
-                            else:
-                                errors.append(f"Unknown string artifact: {artifact[:100]}")
-                                continue
-                        elif isinstance(artifact, Path) and artifact.exists():
-                            shutil.copy2(str(artifact), output_path)
-                        elif hasattr(artifact, "save"):
-                            artifact.save(str(output_path))
-                        elif isinstance(artifact, bytes):
-                            with open(output_path, "wb") as f:
-                                f.write(artifact)
-                        elif hasattr(artifact, "__str__") and str(artifact).startswith(("http://", "https://")):
-                            import urllib.request
-                            urllib.request.urlretrieve(str(artifact), str(output_path))
-                        else:
-                            errors.append(f"Unknown artifact type: {type(artifact)}")
+                        if not pointer:
+                            errors.append(
+                                f"No edited video URL or artifact returned for {Path(sample.filepath).name}. "
+                                f"Response: {content[:200]}"
+                            )
+                            pb.update()
                             continue
 
-                        output_paths.append(str(output_path))
+                        output_path = output_dir / f"{source_name}_edited.mp4"
 
-                        # Add edited artifact as a viewable sample
+                        if pointer.startswith(("http://", "https://")):
+                            # Form 1: direct download URL
+                            urllib.request.urlretrieve(pointer, str(output_path))
+                        else:
+                            # Form 2: artifact id (strip any trailing extension,
+                            # e.g. vid_abc123.mp4) -> exchange for bytes.
+                            artifact_ref = pointer.split(".")[0]
+                            session_id = getattr(response, "session_id", None)
+                            if not session_id and hasattr(response, "model_extra"):
+                                session_id = response.model_extra.get("session_id")
+                            artifact = self._get_artifact_with_retry(
+                                client=client,
+                                session_id=session_id,
+                                artifact_ref=artifact_ref,
+                            )
+                            if isinstance(artifact, Path) and artifact.exists():
+                                shutil.copy2(str(artifact), output_path)
+                            elif isinstance(artifact, str) and Path(artifact).exists():
+                                shutil.copy2(artifact, output_path)
+                            elif isinstance(artifact, str) and artifact.startswith(("http://", "https://")):
+                                urllib.request.urlretrieve(artifact, str(output_path))
+                            elif isinstance(artifact, bytes):
+                                with open(output_path, "wb") as f:
+                                    f.write(artifact)
+                            else:
+                                errors.append(
+                                    f"Unknown video artifact type: {type(artifact)}"
+                                )
+                                pb.update()
+                                continue
+
+                        output_paths = [str(output_path)]
                         if ctx.dataset:
                             new_sample = fo.Sample(filepath=str(output_path))
                             new_sample.tags.append("vlmrun_edited")
@@ -1301,10 +1448,106 @@ class VLMRunChatCompletions(foo.Operator):
                             new_sample["generated_by"] = "vlmrun_chat_completions"
                             new_sample["model"] = model
                             ctx.dataset.add_sample(new_sample)
+                    else:
+                        session_id = getattr(response, "session_id", None)
+                        if not session_id and hasattr(response, "model_extra"):
+                            session_id = response.model_extra.get("session_id")
+
+                        # Parse artifact IDs from content (plural types may return a list)
+                        artifact_ids = _parse_artifact_ids(content, output_artifact_types)
+                        object_ids = artifact_ids.get(output_artifact_types[0])
+
+                        if not object_ids:
+                            # Fallback: search for artifact refs via regex
+                            refs = re.findall(r'(?:img|vid)_[a-zA-Z0-9]{6}', content)
+                            if refs:
+                                object_ids = refs
+
+                        if not object_ids:
+                            errors.append(
+                                f"No edited artifact produced for {Path(sample.filepath).name}. "
+                                f"Response: {content[:200]}"
+                            )
+                            pb.update()
+                            continue
+
+                        # Normalize to list
+                        if isinstance(object_ids, str):
+                            object_ids = [object_ids]
+
+                        ext_map = {
+                            "img": ".png",
+                            "vid": ".mp4",
+                            "aud": ".mp3",
+                            "doc": ".pdf",
+                            "spz": ".spz",
+                            "recon": ".spz",
+                        }
+                        output_paths = []
+
+                        for object_id in object_ids:
+                            # Download the artifact
+                            artifact = self._get_artifact_with_retry(
+                                client=client,
+                                session_id=session_id,
+                                artifact_ref=object_id,
+                            )
+
+                            # Save to disk - determine extension from artifact type
+                            artifact_type = (
+                                object_id.split("_")[0] if "_" in object_id else "img"
+                            )
+                            ext = ext_map.get(artifact_type, ".png")
+                            output_path = output_dir / f"{source_name}_{object_id}{ext}"
+
+                            if isinstance(artifact, str):
+                                if Path(artifact).exists():
+                                    shutil.copy2(artifact, output_path)
+                                elif artifact.startswith(("http://", "https://")):
+                                    import urllib.request
+                                    urllib.request.urlretrieve(
+                                        str(artifact), str(output_path)
+                                    )
+                                else:
+                                    errors.append(
+                                        f"Unknown string artifact: {artifact[:100]}"
+                                    )
+                                    continue
+                            elif isinstance(artifact, Path) and artifact.exists():
+                                shutil.copy2(str(artifact), output_path)
+                            elif hasattr(artifact, "save"):
+                                artifact.save(str(output_path))
+                            elif isinstance(artifact, bytes):
+                                with open(output_path, "wb") as f:
+                                    f.write(artifact)
+                            elif hasattr(artifact, "__str__") and str(artifact).startswith(
+                                ("http://", "https://")
+                            ):
+                                import urllib.request
+                                urllib.request.urlretrieve(
+                                    str(artifact), str(output_path)
+                                )
+                            else:
+                                errors.append(f"Unknown artifact type: {type(artifact)}")
+                                continue
+
+                            output_paths.append(str(output_path))
+
+                            # Add edited artifact as a viewable sample
+                            if ctx.dataset:
+                                new_sample = fo.Sample(filepath=str(output_path))
+                                new_sample.tags.append("vlmrun_edited")
+                                new_sample["prompt"] = prompt
+                                new_sample["source_filepath"] = sample.filepath
+                                new_sample["generated_by"] = "vlmrun_chat_completions"
+                                new_sample["model"] = model
+                                ctx.dataset.add_sample(new_sample)
 
                     # Store output path(s) on the original sample
                     if output_paths:
-                        sample[result_field] = output_paths if len(output_paths) > 1 else output_paths[0]
+                        sample[result_field] = (
+                            output_paths if len(output_paths) > 1 else output_paths[0]
+                        )
                         sample.save()
 
                     processed += 1
@@ -1334,7 +1577,7 @@ class VLMRunChatCompletions(foo.Operator):
     def _execute_analyze(self, ctx: foo.ExecutionContext, api_key: str) -> Dict[str, Any]:
         """Execute media analysis mode."""
         target = ctx.params.get("target", "DATASET")
-        model = ctx.params.get("model", DEFAULT_MODEL)
+        model = ctx.params.get("model") or _default_model()
         prompt = ctx.params["prompt"]
         result_field = ctx.params.get("result_field", "chat_response")
         temperature = ctx.params.get("temperature", 0.0)
@@ -1429,7 +1672,7 @@ class VLMRunChatCompletions(foo.Operator):
                     }
 
                     # Make the API call using Orion agent completions
-                    response = client.agent.completions.create(**request_kwargs)
+                    response = _create_completion(client, **request_kwargs)
 
                     # Extract and store the result
                     self._process_chat_result(
@@ -1491,92 +1734,64 @@ class VLMRunChatCompletions(foo.Operator):
         retry_count: int = 20,
         delay: float = 3.0,
     ) -> Any:
-        """Get an artifact from VLM Run with retry logic.
+        """Fetch an artifact's bytes from VLM Run, retrying until it's available.
 
-        Some artifacts (especially 3D reconstructions) may not be immediately
-        available after the API response. This method retries with a delay.
+        Fetches ``GET /v1/artifacts`` directly instead of the SDK's
+        ``client.artifacts.get()``. The SDK asserts the HTTP ``Content-Type``
+        matches the artifact type and raises an ``AssertionError`` when VLM Run
+        serves a mismatched type (e.g. an ``img_`` artifact sent as
+        ``application/octet-stream``); fetching the raw bytes avoids that crash.
+        Artifacts can also lag the completion response, so we poll with a delay.
 
         Args:
-            client: VLMRun client instance.
+            client: VLMRun client instance (provides ``base_url`` and ``api_key``).
             session_id: The session ID from the response.
-            artifact_ref: The artifact reference (e.g., recon_abc123).
+            artifact_ref: The artifact reference (e.g., ``img_abc123``); any
+                trailing file extension is stripped.
             retry_count: Number of retries before giving up.
             delay: Delay in seconds between retries.
 
         Returns:
-            The artifact data.
+            Raw ``bytes`` for file artifacts (img/vid/doc/aud), or the URL string
+            for ``url_`` artifacts (callers download it).
 
         Raises:
-            Exception: If artifact retrieval fails after all retries.
+            RuntimeError: If retrieval fails after all retries, or on an
+                unrecoverable auth error.
         """
         import time
 
-        last_error = None
+        import requests
+
+        object_id = artifact_ref.split(".")[0]  # strip any trailing extension
+        obj_type = object_id.split("_")[0]
+        url = f"{client.base_url.rstrip('/')}/artifacts"
+        headers = {"Authorization": f"Bearer {client.api_key}"}
+        params = {"object_id": object_id, "session_id": session_id}
+
+        last_error: Any = None
         for attempt in range(retry_count):
             try:
-                return client.artifacts.get(
-                    session_id=session_id,
-                    object_id=artifact_ref,
-                )
-            except Exception as e:
+                resp = requests.get(url, headers=headers, params=params, timeout=120)
+            except Exception as e:  # transient network error — retry
                 last_error = e
-                if attempt < retry_count - 1:
-                    time.sleep(delay)
-                    continue
-                raise
+            else:
+                if resp.status_code in (401, 403):
+                    # auth failures will not resolve by waiting
+                    raise RuntimeError(
+                        f"Unauthorized fetching artifact {object_id} (HTTP {resp.status_code})"
+                    )
+                if resp.status_code == 200 and resp.content:
+                    if obj_type == "url":
+                        return resp.content.decode("utf-8", errors="replace").strip()
+                    return resp.content
+                last_error = RuntimeError(f"artifact not ready (HTTP {resp.status_code})")
+            if attempt < retry_count - 1:
+                time.sleep(delay)
 
         raise RuntimeError(
-            f"Failed to get artifact {artifact_ref} after {retry_count} retries: {last_error}"
+            f"Failed to get artifact {object_id} after {retry_count} retries: {last_error}"
         )
-
-    def _convert_spz_to_ply(
-        self, spz_path: Path, errors: list
-    ) -> Optional[Path]:
-        """Convert SPZ Gaussian Splat file to PLY format for FiftyOne.
-
-        Uses the spz library from Niantic Labs to convert SPZ files to PLY.
-        FiftyOne supports PLY files for 3D visualization.
-
-        Args:
-            spz_path: Path to the SPZ file.
-            errors: List to append any errors to.
-
-        Returns:
-            Path to the converted PLY file, or None if conversion failed.
-        """
-        try:
-            import spz as spz_lib
-
-            # Load SPZ file
-            unpack_options = spz_lib.UnpackOptions()
-            cloud = spz_lib.load_spz(str(spz_path), unpack_options)
-
-            if cloud.num_points == 0:
-                errors.append(f"SPZ file is empty: {spz_path}")
-                return None
-
-            # Save to PLY file
-            pack_options = spz_lib.PackOptions()
-            ply_path = Path(str(spz_path).replace(".spz", ".ply"))
-            success = spz_lib.save_splat_to_ply(cloud, pack_options, str(ply_path))
-
-            if success:
-                # Remove the original SPZ file
-                spz_path.unlink()
-                return ply_path
-            else:
-                errors.append(f"Failed to convert SPZ to PLY: {spz_path}")
-                return None
-
-        except ImportError:
-            errors.append(
-                "SPZ library not installed. Install with: "
-                "pip install git+https://github.com/nianticlabs/spz.git"
-            )
-            return None
-        except Exception as e:
-            errors.append(f"SPZ to PLY conversion failed: {str(e)}")
-            return None
 
     def _process_chat_result(
         self,

@@ -12,7 +12,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="vlmrun-plugin",
-    version="1.0.0",
+    version="2.0.0",
     author="VLM Run Team",
     author_email="support@vlm.run",
     description="FiftyOne plugin for VLM Run's vision-language model",

@@ -1,7 +1,7 @@
 name: "@vlm-run/vlmrun-voxel51-plugin"
 label: VLM Run
 description: 🎯 Extract structured data from visual and audio sources including documents, images, and videos
-version: 1.0.0
+version: 2.0.0
 author: VLM Run Team
 license: MIT
 url: https://github.com/vlm-run/vlmrun-voxel51-plugin
